@@ -49,7 +49,7 @@ Recognized params: :tags, :match, :collection, :limit, :output (org-list|org-tab
          (output (or (cdr (assoc :output params)) 'org-list))
          (items (if tags (apply #'raindrop-fetch (list :tags tags :match match :limit limit :collection (or collection raindrop-default-collection))) '())))
     (pcase output
-      ('org-list (if (null items) "- Нет результатов" (raindrop-render-org-list items)))
+      ('org-list (if (null items) "- No results" (raindrop-render-org-list items)))
       (_ (user-error "ob-raindrop: Unsupported :output %S" output)))))
 
 (provide 'ob-raindrop)

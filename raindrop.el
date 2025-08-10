@@ -81,14 +81,14 @@ Avoid storing secrets in plain files; prefer auth-source."
 
 (defcustom raindrop-default-collection 0
   "Default collection ID used for queries.
-По спецификации Raindrop: collectionId=0 означает «все коллекции». Для работы
-по умолчанию используем 0 как «все». Укажите конкретный числовой ID для выборки
-по отдельной коллекции."
+Per the Raindrop spec, collectionId=0 means “all collections”. For default
+behavior we treat 0 as “all”. Set a concrete numeric ID to query a single
+collection."
   :type 'integer
   :group 'raindrop)
 
 (defcustom raindrop-debug-enable nil
-  "Включить подробные сообщения отладки HTTP-запросов."
+  "Enable verbose debug messages for HTTP requests."
   :type 'boolean
   :group 'raindrop)
 
@@ -154,7 +154,7 @@ Prefer quoting for tags containing spaces or commas."
    ((null tags) nil)
    ((listp tags)
     (seq-filter (lambda (s) (and (stringp s) (> (length s) 0)))
-                (mapcar (lambda (t) (if (symbolp t) (symbol-name t) t)) tags)))
+                (mapcar (lambda (tag) (if (symbolp tag) (symbol-name tag) tag)) tags)))
    ((stringp tags)
     (let* ((s tags)
            (has-comma (string-match-p "," s))
@@ -197,11 +197,11 @@ Prefer quoting for tags containing spaces or commas."
             (concat "?" (raindrop--build-query query-alist)))))
 
 (defun raindrop--collection-endpoint (collection)
-  "Вернуть базовый эндпоинт для чтения закладок по COLLECTION.
-Для списка по коллекции — `/raindrops/<id>`; для «все коллекции» — `/raindrops/0`.
+  "Return the base endpoint for listing by COLLECTION.
+For a specific collection: `/raindrops/<id>`; for “all collections”: `/raindrops/0`.
 
-Примечание: глобальный поиск по всем коллекциям лучше выполнять через `/raindrops`
-без ID. Используйте `raindrop--endpoint-for` для выбора с учётом search."
+Note: global search across all collections should use `/raindrops` (no ID).
+Use `raindrop--endpoint-for` to choose when a search is present."
   (let* ((id (cond
               ((numberp collection) collection)
               ((or (eq collection 'all) (eq collection :all) (null collection)) raindrop-default-collection)
@@ -210,9 +210,9 @@ Prefer quoting for tags containing spaces or commas."
       (format "/raindrops/%s" cid))))
 
 (defun raindrop--endpoint-for (collection search-present)
-  "Выбрать корректный эндпоинт с учётом COLLECTION и наличия поиска.
-Если `search-present` и COLLECTION указывает на «все коллекции» (<= 0),
-используем глобальный `/raindrops` (без ID), иначе — `/raindrops/<id>`."
+  "Pick the correct endpoint given COLLECTION and search presence.
+If `search-present` and COLLECTION refers to “all collections” (<= 0), use the
+global `/raindrops` (no ID); otherwise use `/raindrops/<id>`."
   (let* ((id (cond
               ((numberp collection) collection)
               ((or (eq collection 'all) (eq collection :all) (null collection)) raindrop-default-collection)
@@ -318,17 +318,17 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
              (funcall cb result err)))
          nil t t)))))
 
-(defun raindrop--quote-tag (t)
-  "Преобразовать имя тега T в токен поиска Raindrop: #tag или #\"multi word\"."
-  (let ((s (if (symbolp t) (symbol-name t) t)))
+(defun raindrop--quote-tag (tag)
+  "Convert tag name T to a Raindrop search token: #tag or #\"multi word\"."
+  (let ((s (if (symbolp tag) (symbol-name tag) tag)))
     (if (string-match-p "[\t\n\r ]" s)
         (concat "#\"" (replace-regexp-in-string "\"" "\\\"" s) "\"")
       (concat "#" s))))
 
 (defun raindrop--build-tag-search (tags match)
-  "Собрать строку поиска для TAGS с учётом MATCH ('all|'any)."
+  "Build a search string for TAGS honoring MATCH ('all|'any)."
   (let* ((ts (seq-filter (lambda (s) (and (stringp s) (> (length s) 0)))
-                         (mapcar (lambda (t) (if (symbolp t) (symbol-name t) t)) tags)))
+                         (mapcar (lambda (tag) (if (symbolp tag) (symbol-name tag) tag)) tags)))
          (terms (mapcar #'raindrop--quote-tag ts)))
     (pcase match
       ('any (string-join (cons "match:OR" terms) " "))
@@ -442,10 +442,9 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
 ;;; Filters API
 
 (defun raindrop--filters-endpoint (collection)
-  "Вернуть эндпоинт Filters для COLLECTION.
-Документация Raindrop: GET /filters/{collectionId}, где collectionId = 0 — все коллекции.
-В нашем API convention значение < 0 трактуется как «все коллекции», поэтому
-тут оно маппится на 0."
+  "Return the Filters endpoint for COLLECTION.
+Per Raindrop docs: GET /filters/{collectionId}, where collectionId = 0 means all collections.
+By our convention, values <= 0 are treated as “all collections” and mapped to 0 here."
   (let* ((id (cond
               ((numberp collection) collection)
               ((or (eq collection 'all) (eq collection :all) (null collection)) raindrop-default-collection)
@@ -454,14 +453,14 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
     (format "/filters/%s" cid)))
 
 (defun raindrop-filters (&rest plist)
-  "Получить агрегированные фильтры для заданной коллекции.
-PLIST ключи:
-  :collection — id коллекции (по умолчанию `raindrop-default-collection` → «все»)
-  :search — строка поиска (как в /raindrops search=)
-  :tags-sort — 'count (по умолчанию) или '_id
+  "Fetch aggregated filters for a given collection.
+PLIST keys:
+  :collection — collection id (default `raindrop-default-collection` → “all”)
+  :search — search string (same as /raindrops search=)
+  :tags-sort — 'count (default) or '_id
 
-Возвращает alist согласно спецификации: поля broken, duplicates, important,
-notag, tags (список {_id count}), types (список {_id count})."
+Returns an alist per API: fields broken, duplicates, important, notag,
+tags (list of {_id count}), types (list of {_id count})."
   (let* ((collection (or (plist-get plist :collection) raindrop-default-collection))
          (search (plist-get plist :search))
          (tags-sort (or (plist-get plist :tags-sort) 'count))
@@ -477,8 +476,8 @@ notag, tags (список {_id count}), types (список {_id count})."
 
 ;;;###autoload
 (defun raindrop-debug-filters (&optional collection search)
-  "Сделать сырой запрос к Filters API для COLLECTION с SEARCH.
-COLLECTION по умолчанию — «все» (`raindrop-default-collection`)."
+  "Make a raw request to the Filters API for COLLECTION with SEARCH.
+COLLECTION defaults to “all” (`raindrop-default-collection`)."
   (let* ((coll (or collection raindrop-default-collection))
          (payload (raindrop-filters :collection coll :search search)))
     payload))
@@ -486,21 +485,21 @@ COLLECTION по умолчанию — «все» (`raindrop-default-collection`
 ;;; Collections helpers (to discover valid IDs)
 
 (defun raindrop-collections ()
-  "Получить список коллекций пользователя (alist payload).
-Полезно, чтобы узнать корректные ID коллекций для запросов /raindrops/{id}."
+  "Get the user's collection list (alist payload).
+Useful for discovering valid collection IDs for /raindrops/{id} requests."
   (raindrop-api-request "/collections" 'GET nil nil))
 
 ;;;###autoload
 (defun raindrop-debug-collections ()
-  "Вернуть сырой payload со списком коллекций."
+  "Return the raw payload with the collection list."
   (raindrop-collections))
 
 ;;; Minimal debug helpers
 
 ;;;###autoload
 (defun raindrop-debug-search (tags &optional collection)
-  "Сделать сырой запрос к API с фильтром по TAGS и вернуть payload (alist).
-TAGS — строка или список тегов. COLLECTION — id коллекции (по умолчанию 0 — все коллекции)."
+  "Make a raw API request filtered by TAGS and return the payload (alist).
+TAGS is a string or list of tags. COLLECTION is a collection id (default 0 = all collections)."
   (let* ((tags-list (raindrop-parse-tags tags))
          (search (and tags-list (raindrop--build-tag-search tags-list 'all)))
          (coll (if (numberp collection) collection 0))
@@ -510,8 +509,8 @@ TAGS — строка или список тегов. COLLECTION — id колл
 
 ;;;###autoload
 (defun raindrop-debug-fetch (tags &optional collection limit)
-  "Получить нормализованный список закладок по TAGS.
-COLLECTION — id коллекции (по умолчанию 0 — все). LIMIT — максимум элементов (по умолчанию 10)."
+  "Get a normalized list of bookmarks filtered by TAGS.
+COLLECTION is the collection id (default 0 = all). LIMIT is the maximum number of items (default 10)."
   (let* ((tags-list (raindrop-parse-tags tags))
          (coll (if (numberp collection) collection 0))
          (lim (or limit 10)))

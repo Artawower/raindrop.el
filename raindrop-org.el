@@ -36,7 +36,7 @@
   "Org integration for raindrop.el."
   :group 'raindrop)
 
-(defcustom raindrop-links-empty-text "- Нет результатов"
+(defcustom raindrop-links-empty-text "- No results"
   "Text inserted when no links are found."
   :type 'string
   :group 'raindrop-org)
@@ -129,7 +129,7 @@ With prefix argument USE-ANY (C-u), use OR semantics for tags."
   (let* ((tags (raindrop-extract-heading-tags))
          (match (if use-any 'any raindrop-heading-tags-match)))
     (unless (and tags (> (length tags) 0))
-      (user-error "raindrop.el: У заголовка нет тегов"))
+      (user-error "raindrop.el: Current heading has no tags"))
     (let* ((org-buf (current-buffer))
            (heading-marker (save-excursion (org-back-to-heading t) (point-marker))))
       (save-excursion
@@ -157,7 +157,7 @@ With prefix argument USE-ANY (C-u), use OR semantics for tags."
                            (<= (point-min) cbeg) (<= cend (point-max)))
                   (delete-region cbeg cend)
                   (goto-char cbeg)
-                  (insert "- Загрузка…\n"))))))
+                  (insert "- Loading…\n"))))))
         ;; Async fetch and replace within original org buffer
         (prog1 :started
           (raindrop-fetch-async
@@ -183,7 +183,7 @@ With prefix argument USE-ANY (C-u), use OR semantics for tags."
                              (delete-region cbeg cend)
                              (goto-char cbeg)
                              (insert (cond
-                                      (err (format "- Ошибка: %s" err))
+                                      (err (format "- Error: %s" err))
                                       ((null items) raindrop-links-empty-text)
                                       (t (raindrop-render-org-list items))))
                              (insert "\n"))))))))
