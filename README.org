@@ -94,7 +94,7 @@ Load packages (autoloads are simple; explicit require is fine):
 ** Insert/Update links under a heading (tags AND)
 Add tags to a heading, e.g.:
 #+BEGIN_EXAMPLE
-* Книги  :book:fiction:
+* Books                                                        :book:fiction:
 #+END_EXAMPLE
 
 Then run:
