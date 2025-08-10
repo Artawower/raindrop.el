@@ -79,10 +79,13 @@ ITEM is an alist with keys :link :title :excerpt."
   "Dynamic block writer for Raindrop.
 PARAMS plist:
   :tags (string or list) — tags to match
+  :folders or :folder — folder names to match (Raindrop collections)
   :match ('all|'any) — semantics (default 'all)
   :collection (number) — optional collection id
   :limit (int) — max items (default `raindrop-default-limit`)"
   (let* ((tags (raindrop-parse-tags (raindrop--param params :tags)))
+         (folders (raindrop-parse-folders (or (raindrop--param params :folders)
+                                             (raindrop--param params :folder))))
          (match-raw (raindrop--param params :match 'all))
          (match (cond
                  ((symbolp match-raw) match-raw)
@@ -102,7 +105,11 @@ PARAMS plist:
                    ((numberp l) l)
                    ((and (stringp l) (string-match-p "^[0-9]+$" l)) (string-to-number l))
                    (t raindrop-default-limit))))
-         (items (if tags (apply #'raindrop-fetch (list :tags tags :match match :limit limit :collection collection*)) '())))
+         (items (if (or tags folders)
+                    (apply #'raindrop-fetch (append (list :match match :limit limit :collection collection*)
+                                                    (when tags (list :tags tags))
+                                                    (when folders (list :folders folders))))
+                  '())))
 
     (message "items: %s" items)
     (let ((content-beg (point)))

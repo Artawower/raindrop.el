@@ -95,6 +95,9 @@ collection."
 (defconst raindrop--user-agent "raindrop.el/0.1.0 (+https://github.com/artawower/raindrop.el)"
   "User-Agent header for Raindrop requests.")
 
+(defvar raindrop--collections-cache nil
+  "Cached list of collections as returned by `/collections` (value of 'items).")
+
 (defun raindrop--mask (s)
   "Return masked version of secret string S for logs."
   (when (stringp s)
@@ -142,7 +145,7 @@ Tries each host from `raindrop-auth-source-hosts`, then falls back to
            (throw 'done raindrop-custom-token)))))
     (user-error "raindrop.el: Token not found. Configure auth-source or RAINDROP_TOKEN.")))
 
-;; Tags parsing utilities
+;; Tags/folders parsing utilities
 (defun raindrop-parse-tags (tags)
   "Normalize TAGS param to a list of strings.
 Accepts list of symbols/strings or a string. The string form supports:
@@ -179,6 +182,11 @@ Prefer quoting for tags containing spaces or commas."
           (setq start (match-end 0)))
         (nreverse out))))
    (t (list (format "%s" tags)))))
+
+(defun raindrop-parse-folders (folders)
+  "Normalize FOLDERS param to a list of strings.
+Accepts same formats as `raindrop-parse-tags` (list, comma/space-separated string)."
+  (raindrop-parse-tags folders))
 
 (defun raindrop--build-query (params)
   "Build URL query string from PARAMS alist ((key . value) ...)."
@@ -219,6 +227,28 @@ global `/raindrops` (no ID); otherwise use `/raindrops/<id>`."
     (if (and search-present (<= id 0))
         "/raindrops"
       (format "/raindrops/%s" (if (<= id 0) 0 id)))))
+
+(defun raindrop--collections-list ()
+  "Return and cache the list of user's collections (list of alists)."
+  (or raindrop--collections-cache
+      (let* ((payload (raindrop-collections))
+             (items (or (alist-get 'items payload)
+                        (alist-get 'collections payload)
+                        nil)))
+        (setq raindrop--collections-cache (and (listp items) items))
+        raindrop--collections-cache)))
+
+(defun raindrop--resolve-collection-id (folder-name)
+  "Resolve FOLDER-NAME (string/symbol) to a collection ID or nil."
+  (let* ((name (if (symbolp folder-name) (symbol-name folder-name) folder-name))
+         (items (raindrop--collections-list))
+         (match (seq-find (lambda (it)
+                            (let ((title (alist-get 'title it)))
+                              (and (stringp title)
+                                   (or (string= title name)
+                                       (string-equal (downcase title) (downcase name))))))
+                          items)))
+    (alist-get '_id match)))
 
 (defun raindrop-api-request (endpoint &optional method query-alist data)
   "Perform HTTP request to Raindrop API.
@@ -324,14 +354,29 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
         (concat "#\"" (replace-regexp-in-string "\"" "\\\"" s) "\"")
       (concat "#" s))))
 
-(defun raindrop--build-tag-search (tags match)
-  "Build a search string for TAGS honoring MATCH ('all|'any)."
+(defun raindrop--quote-folder (name)
+  "Convert folder NAME to a Raindrop search token: collection:NAME or collection:\"multi word\"."
+  (let ((s (if (symbolp name) (symbol-name name) name)))
+    (if (string-match-p "[\t\n\r ]" s)
+        (concat "collection:\"" (replace-regexp-in-string "\"" "\\\"" s) "\"")
+      (concat "collection:" s))))
+
+(defun raindrop--build-search (tags folders match)
+  "Build a combined search string for TAGS and FOLDERS honoring MATCH ('all|'any)."
   (let* ((ts (seq-filter (lambda (s) (and (stringp s) (> (length s) 0)))
-                         (mapcar (lambda (tag) (if (symbolp tag) (symbol-name tag) tag)) tags)))
-         (terms (mapcar #'raindrop--quote-tag ts)))
+                         (mapcar (lambda (tag) (if (symbolp tag) (symbol-name tag) tag)) (or tags '()))))
+         (fs (seq-filter (lambda (s) (and (stringp s) (> (length s) 0)))
+                         (mapcar (lambda (f) (if (symbolp f) (symbol-name f) f)) (or folders '()))))
+         (terms (append (mapcar #'raindrop--quote-tag ts)
+                        (mapcar #'raindrop--quote-folder fs))))
     (pcase match
       ('any (string-join (cons "match:OR" terms) " "))
       (_    (string-join terms " ")))))
+
+(defun raindrop--build-tag-search (tags match)
+  "Build a search string for TAGS honoring MATCH ('all|'any).
+Kept for backward compatibility; delegates to `raindrop--build-search`."
+  (raindrop--build-search tags nil match))
 
 (defun raindrop--normalize-item (raw)
   "Normalize RAW Raindrop item alist into a simpler alist."
@@ -354,15 +399,24 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
 
 (defun raindrop-fetch (&rest plist)
   "Fetch raindrops according to PLIST keys:
-:tags (list of strings/symbols), :collection (number or 0 for all),
+:tags (list of strings/symbols), :folders (list of strings) or :folder (string), :collection (number or 0 for all),
 :limit (int), :sort (symbol), :match ('all|'any). Returns list of normalized items."
   (message "fetch params: %s" plist)
   (let* ((tags (plist-get plist :tags))
+         (folders (or (plist-get plist :folders)
+                      (let ((f (plist-get plist :folder))) (and f (list f)))))
          (collection (or (plist-get plist :collection) raindrop-default-collection))
          (limit (or (plist-get plist :limit) raindrop-default-limit))
          (match (or (plist-get plist :match) 'all))
-         (search (and tags (raindrop--build-tag-search (if (listp tags) tags (list tags)) match)))
-         (endpoint (raindrop--endpoint-for collection (and search t)))
+         (tags* (and tags (if (listp tags) tags (list tags))))
+         (folders* (and folders (if (listp folders) folders (list folders))))
+         (resolved-coll (and folders* (= (length folders*) 1)
+                             (let ((cid (raindrop--resolve-collection-id (car folders*))))
+                               (and (integerp cid) (> cid 0) cid))))
+         (effective-coll (or resolved-coll collection))
+         (search (and (or tags* (and folders* (not resolved-coll)))
+                      (raindrop--build-search tags* (and (not resolved-coll) folders*) match)))
+         (endpoint (raindrop--endpoint-for effective-coll (and search t)))
          ;; perpage: up to 100. We’ll loop pages if needed later; MVP fetches one page.
          (query `((perpage . ,(min limit 100))
                   ,@(when search `((search . ,search)))))
@@ -372,8 +426,8 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
           (setq payload (raindrop-api-request endpoint 'GET query nil)
                 items (alist-get 'items payload)
                 coll-id (cond
-                         ((numberp collection) collection)
-                         ((or (eq collection 'all) (eq collection :all) (null collection)) raindrop-default-collection)
+                         ((numberp effective-coll) effective-coll)
+                         ((or (eq effective-coll 'all) (eq effective-coll :all) (null effective-coll)) raindrop-default-collection)
                          (t raindrop-default-collection)))
           ;; Fallback: empty items on one endpoint, try the alternate endpoint
           (when (and (<= coll-id 0) search (or (null items) (equal items '())))
@@ -385,8 +439,8 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
       (user-error
        (let* ((msg (error-message-string err))
               (coll-id (cond
-                        ((numberp collection) collection)
-                        ((or (eq collection 'all) (eq collection :all) (null collection)) raindrop-default-collection)
+                        ((numberp effective-coll) effective-coll)
+                        ((or (eq effective-coll 'all) (eq effective-coll :all) (null effective-coll)) raindrop-default-collection)
                         (t raindrop-default-collection))))
          (if (and (string-match-p "404" msg)
                   (<= coll-id 0)
@@ -400,16 +454,25 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
 (defun raindrop-fetch-async (plist callback)
   "Asynchronously fetch raindrops according to PLIST and call CALLBACK with (items err)."
   (let* ((tags (plist-get plist :tags))
+         (folders (or (plist-get plist :folders)
+                      (let ((f (plist-get plist :folder))) (and f (list f)))))
          (collection (or (plist-get plist :collection) raindrop-default-collection))
          (limit (or (plist-get plist :limit) raindrop-default-limit))
          (match (or (plist-get plist :match) 'all))
-         (search (and tags (raindrop--build-tag-search (if (listp tags) tags (list tags)) match)))
-         (endpoint (raindrop--endpoint-for collection (and search t)))
+         (tags* (and tags (if (listp tags) tags (list tags))))
+         (folders* (and folders (if (listp folders) folders (list folders))))
+         (resolved-coll (and folders* (= (length folders*) 1)
+                             (let ((cid (raindrop--resolve-collection-id (car folders*))))
+                               (and (integerp cid) (> cid 0) cid))))
+         (effective-coll (or resolved-coll collection))
+         (search (and (or tags* (and folders* (not resolved-coll)))
+                      (raindrop--build-search tags* (and (not resolved-coll) folders*) match)))
+         (endpoint (raindrop--endpoint-for effective-coll (and search t)))
          (query `((perpage . ,(min limit 100))
                   ,@(when search `((search . ,search))))))
     (let ((coll-id (cond
-                    ((numberp collection) collection)
-                    ((or (eq collection 'all) (eq collection :all) (null collection)) raindrop-default-collection)
+                    ((numberp effective-coll) effective-coll)
+                    ((or (eq effective-coll 'all) (eq effective-coll :all) (null effective-coll)) raindrop-default-collection)
                     (t raindrop-default-collection))))
       (raindrop-api-request-async
        endpoint 'GET query nil

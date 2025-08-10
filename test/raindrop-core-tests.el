@@ -336,4 +336,34 @@
       (should (search-forward "#+BEGIN: raindrop" nil t))
       (should (search-forward "[[https://ex.com][T]] — E" nil t)))))
 
+;; Folders support new tests
+
+(ert-deftest raindrop-quote-folder-basic-and-spaces ()
+  (should (equal (raindrop--quote-folder 'Work) "collection:Work"))
+  (should (equal (raindrop--quote-folder "Multi Word") "collection:\"Multi Word\"")))
+
+(ert-deftest raindrop-build-search-folders-and-tags ()
+  (let* ((s-all (raindrop--build-search '("t1") '("Folder A") 'all))
+         (s-any (raindrop--build-search '("t1") '("Folder A") 'any)))
+    (should (string-match-p "#t1" s-all))
+    (should (string-match-p "collection:\\"Folder A\\"" s-all))
+    (should (not (string-match-p "match:OR" s-all)))
+    (should (string-match-p "^match:OR" s-any))
+    (should (string-match-p "#t1" s-any))
+    (should (string-match-p "collection:\\"Folder A\\"" s-any))))
+
+(ert-deftest raindrop-dblock-accepts-folder-param ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+BEGIN: raindrop :folder \"Folder A\" :match all :limit 5\n#+END:\n")
+    (goto-char (point-min))
+    (let (saw-folders)
+      (cl-letf (((symbol-function 'raindrop-fetch)
+                 (lambda (&rest plist)
+                   (setq saw-folders (plist-get plist :folders))
+                   nil)))
+        (org-dblock-write:raindrop '(:folder "Folder A" :match all :limit 5))
+        (should (equal saw-folders '("Folder A"))))))
+
 ;;; raindrop-core-tests.el ends here
+
