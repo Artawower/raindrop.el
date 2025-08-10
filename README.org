@@ -1,0 +1,156 @@
+:PROPERTIES:
+:ID:       raindrop.el
+:END:
+
+#+TITLE: ✨ raindrop.el — Raindrop → Org-mode
+
+#+html: <div align='center'>
+#+html: <span class='badge-buymeacoffee'>
+#+html: <a href='https://www.paypal.me/darkawower' title='Paypal' target='_blank'><img src='https://img.shields.io/badge/paypal-donate-blue.svg' alt='Buy Me A Coffee donate button' /></a>
+#+html: </span>
+#+html: <span class='badge-patreon'>
+#+html: <a href='https://patreon.com/artawower' target='_blank' title='Donate to this project using Patreon'><img src='https://img.shields.io/badge/patreon-donate-orange.svg' alt='Patreon donate button' /></a>
+#+html: </span>
+#+html: <a href='https://wakatime.com/badge/github/Artawower/raindrop.el'><img src='https://wakatime.com/badge/github/Artawower/raindrop.el.svg' alt='wakatime'></a>
+#+html: </div>
+
+* Introduction
+Integrate your [[https://raindrop.io][Raindrop]] bookmarks into Org-mode.
+
+This package provides:
+- A dynamic block =#+BEGIN: raindrop ... #+END:= that renders a list of links.
+- A helper command to use current heading tags to insert/update a links list.
+- An Org-babel language =raindrop= that returns Org-formatted lists.
+
+This is an AI-assisted Emacs package, created in collaboration with a large
+language model (OpenAI). Requirements and vision were provided by the author.
+
+* Connected links
+- [[https://orgmode.org][Org Mode Documentation]]
+- [[https://developer.raindrop.io][Raindrop API Documentation]]
+- [[https://raindrop.io][Raindrop service]]
+
+* Install
+This package requires Emacs 27.1+ and Org 9.4+.
+
+** quelpa
+#+BEGIN_SRC emacs-lisp
+(use-package raindrop
+  :quelpa (raindrop :fetcher github :repo "artawower/raindrop.el"))
+
+(use-package raindrop-org
+  :after org)
+
+(use-package ob-raindrop
+  :after org)
+#+END_SRC
+
+** straight.el
+#+BEGIN_SRC emacs-lisp
+(use-package raindrop
+  :straight (raindrop :type git :host github :repo "artawower/raindrop.el"))
+
+(use-package raindrop-org :after org)
+(use-package ob-raindrop :after org)
+#+END_SRC
+
+** Doom Emacs
+In =~/.doom.d/packages.el=:
+#+BEGIN_SRC emacs-lisp
+(package! raindrop :recipe (:host github :repo "artawower/raindrop.el"))
+#+END_SRC
+
+Then in =~/.doom.d/config.el=:
+#+BEGIN_SRC emacs-lisp
+(use-package! raindrop)
+(use-package! raindrop-org)
+(use-package! ob-raindrop)
+#+END_SRC
+
+* Setup (Token)
+For security, prefer [[https://www.gnu.org/software/emacs/manual/html_node/auth/][auth-source]]:
+- Create an entry: =machine raindrop.io login token secret <YOUR_TOKEN>=.
+- Alternatively export env var =RAINDROP_TOKEN=. You can also set
+  =raindrop-custom-token=, but this is less secure.
+
+Example auth-source entry for =.authinfo.gpg=:
+#+BEGIN_EXAMPLE
+machine raindrop.io login token password 0123456789abcdef
+#+END_EXAMPLE
+
+* Usage
+Load packages (autoloads are simple; explicit require is fine):
+#+BEGIN_SRC emacs-lisp
+(require 'raindrop)
+(require 'raindrop-org)
+(require 'ob-raindrop)
+#+END_SRC
+
+** Insert/Update links under a heading (tags AND)
+Add tags to a heading, e.g.:
+#+BEGIN_EXAMPLE
+* Книги  :book:fiction:
+#+END_EXAMPLE
+
+Then run:
+#+BEGIN_EXAMPLE
+M-x raindrop-insert-or-update-links-under-heading
+#+END_EXAMPLE
+
+This inserts (or updates) a dynamic block directly in the body of that node,
+rendering an Org bullet list in the form:
+#+BEGIN_EXAMPLE
+- [[https://example.com][Title]] — optional excerpt
+#+END_EXAMPLE
+
+Tip: Use =C-u M-x raindrop-insert-or-update-links-under-heading= to switch to
+OR semantics for tags just for this run; default is AND.
+
+** Dynamic block (manual)
+You can insert a block yourself and refresh with =C-c C-c=:
+#+BEGIN_EXAMPLE
+#+BEGIN: raindrop :tags emacs lisp :match all :limit 50
+#+END:
+#+END_EXAMPLE
+
+Parameters:
+- =:tags= string or list of tags (space/comma separated string works too).
+- =:match= =all= (AND, default) or =any= (OR).
+- =:collection= numeric collection id (optional, =0= means all).
+- =:limit= max items to fetch (default 100).
+
+** Org-babel block
+Returns Org-formatted output; use =:results raw replace=:
+#+BEGIN_SRC raindrop :tags "emacs lisp" :match all :limit 30 :results raw replace
+#+END_SRC
+
+You can also enable via babel languages API:
+#+BEGIN_SRC emacs-lisp
+(with-eval-after-load 'org
+  (require 'ob-raindrop))
+#+END_SRC
+
+* Customization
+- =raindrop-request-timeout=: request timeout (seconds).
+- =raindrop-default-limit=: default fetch limit.
+- =raindrop-auth-source-host=: host to look up in auth-source.
+- =raindrop-token-source=: order of token sources (auth-source/env/custom).
+- =raindrop-links-empty-text=: text when no results.
+- =raindrop-heading-tags-match=: default AND/OR for heading tags.
+
+* Notes
+- Backend uses =url.el= and =json-parse-buffer=.
+- Content is inserted idempotently inside a dynamic block.
+- Title/excerpt are sanitized for single-line list items.
+
+* 🍩 Contribute guide
+Any contribution is welcome!
+Please consider reading the style guide and, if you like this project,
+supporting via Patreon. Typical contributions:
+- Bug reports, feature requests
+- Documentation improvements
+- Code patches
+
+This project is licensed under GPLv3 or later. Make sure your contributions
+are compatible with this license.
+
