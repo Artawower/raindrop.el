@@ -13,6 +13,11 @@
 #+html: </span>
 #+html: <a href='https://wakatime.com/badge/github/Artawower/raindrop.el'><img src='https://wakatime.com/badge/github/Artawower/raindrop.el.svg' alt='wakatime'></a>
 #+html: </div>
+#+html: <div align='center' style='margin-top:6px;'>
+#+html: <a href='https://github.com/Artawower/raindrop.el/actions/workflows/ci.yml'>
+#+html: <img src='https://github.com/Artawower/raindrop.el/actions/workflows/ci.yml/badge.svg' alt='CI Status'>
+#+html: </a>
+#+html: </div>
 
 * Introduction
 Integrate your [[https://raindrop.io][Raindrop]] bookmarks into Org-mode.
@@ -154,3 +159,28 @@ supporting via Patreon. Typical contributions:
 This project is licensed under GPLv3 or later. Make sure your contributions
 are compatible with this license.
 
+* Tests
+This project uses ERT tests located under =test/=.
+
+** Run with Eldev (recommended)
+- Install Eldev by following the instructions at https://github.com/emacs-eldev/eldev.
+- From the project root, run:
+  #+BEGIN_SRC shell
+  eldev test
+  #+END_SRC
+
+Useful variants:
+- Verbose with backtraces: =eldev -dtT test=
+- Select specific tests: =eldev test :selector '"raindrop-parse-tags"'=
+
+** Run with plain Emacs (no Eldev)
+From the project root:
+#+BEGIN_SRC shell
+emacs -Q --batch -L . \
+  -l raindrop.el -l raindrop-org.el \
+  -l test/raindrop-core-tests.el \
+  -f ert-run-tests-batch-and-exit
+#+END_SRC
+
+Notes:
+- Tests are self-contained and do not require a Raindrop token; they do not hit the network.

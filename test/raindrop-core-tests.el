@@ -1,0 +1,339 @@
+;;; raindrop-core-tests.el --- ERT tests for raindrop.el -*- lexical-binding: t; -*-
+
+(require 'ert)
+(require 'cl-lib)
+(require 'subr-x)
+(require 'raindrop)
+(require 'raindrop-org)
+
+(ert-deftest raindrop-parse-tags-nil ()
+  (should (equal (raindrop-parse-tags nil) nil)))
+
+(ert-deftest raindrop-parse-tags-list-mixed ()
+  (should (equal (raindrop-parse-tags '(foo "bar")) '("foo" "bar"))))
+
+(ert-deftest raindrop-parse-tags-string-commas-and-quotes ()
+  (should (equal (raindrop-parse-tags "foo, \"multi word\",bar")
+                 '("foo" "multi word" "bar"))))
+
+(ert-deftest raindrop-parse-tags-string-spaces-no-commas ()
+  (should (equal (raindrop-parse-tags "foo bar baz")
+                 '("foo" "bar" "baz"))))
+
+(ert-deftest raindrop-quote-tag-basic-and-spaces ()
+  (should (equal (raindrop--quote-tag 'foo) "#foo"))
+  (should (equal (raindrop--quote-tag "multi word") "#\"multi word\"")))
+
+(ert-deftest raindrop-build-tag-search-all-vs-any ()
+  (let ((tags '("foo" "multi word" "bar")))
+    (should (equal (raindrop--build-tag-search tags 'all)
+                   "#foo #\"multi word\" #bar"))
+    (should (equal (raindrop--build-tag-search tags 'any)
+                   (string-join (list "match:OR" "#foo" "#\"multi word\"" "#bar") " ")))))
+
+(ert-deftest raindrop-endpoint-for-selection ()
+  ;; No search: collection 0 -> /raindrops/0
+  (should (equal (raindrop--endpoint-for 0 nil) "/raindrops/0"))
+  ;; Search present and collection 0 -> /raindrops
+  (should (equal (raindrop--endpoint-for 0 t) "/raindrops"))
+  ;; Specific collection regardless of search -> /raindrops/<id>
+  (should (equal (raindrop--endpoint-for 5 t) "/raindrops/5"))
+  (should (equal (raindrop--endpoint-for 5 nil) "/raindrops/5")))
+
+(ert-deftest raindrop-filters-endpoint-mapping ()
+  (should (equal (raindrop--filters-endpoint 0) "/filters/0"))
+  (should (equal (raindrop--filters-endpoint -1) "/filters/0"))
+  (should (equal (raindrop--filters-endpoint 7) "/filters/7")))
+
+(ert-deftest raindrop-render-org-list-basic ()
+  (let* ((items (list (list :link "https://ex.com" :title "Title" :excerpt "Desc")))
+         (out (raindrop-render-org-list items)))
+    (should (string-match-p "^- \\[\\[https://ex\\.com\\]\\[Title\\]\\]" out))
+    (should (string-match-p " — Desc$" out))))
+
+;; Additional coverage and negative scenarios
+
+(ert-deftest raindrop-mask-secret ()
+  (should (equal (raindrop--mask "short") "******"))
+  (should (equal (raindrop--mask "abcdefghijkl") "abc******jkl")))
+
+(ert-deftest raindrop-build-query ()
+  (let ((s (raindrop--build-query '((a . 1) (b . 2)))))
+    (should (or (string= s "a=1&b=2") (string= s "b=2&a=1")))))
+
+(ert-deftest raindrop-normalize-item-fallbacks ()
+  (let* ((raw '((link . "https://ex.com") (excerpt . "e") (_id . 1) (tags . (t1 t2))))
+         (it (raindrop--normalize-item raw)))
+    (should (equal (alist-get :title it) "https://ex.com"))
+    (should (equal (alist-get :excerpt it) "e"))
+    (should (equal (alist-get :id it) 1))))
+
+(ert-deftest raindrop-get-token-precedence ()
+  ;; custom should win if placed first
+  (let ((raindrop-token-source '(custom env auth-source))
+        (raindrop-custom-token "CUST")
+        (getenv (lambda (_k) "ENV")))
+    (should (equal (raindrop--get-token) "CUST")))
+  ;; env should win over auth-source
+  (cl-letf* (((symbol-function 'getenv) (lambda (_k) "ENV"))
+             ((symbol-function 'auth-source-search)
+              (lambda (&rest _)
+                (list (list :secret (lambda () "AUTH")))))
+             (raindrop-token-source '(env auth-source)))
+    (should (equal (raindrop--get-token) "ENV"))))
+
+(ert-deftest raindrop-api-request-success-and-error ()
+  ;; Success path
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (_url &rest _)
+               (let ((buf (generate-new-buffer " *raindrop-test*")))
+                 (with-current-buffer buf
+                   (setq-local url-http-response-status 200)
+                   (insert "HTTP/1.1 200 OK\n\n{\"ok\":true,\"items\":[1,2]}"))
+                 buf)))
+            ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
+    (let ((res (raindrop-api-request "/x" 'GET nil nil)))
+      (should (eq (alist-get 'ok res) t))
+      (should (equal (alist-get 'items res) '(1 2)))))
+  ;; Error path with message in body
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (_url &rest _)
+               (let ((buf (generate-new-buffer " *raindrop-test*")))
+                 (with-current-buffer buf
+                   (setq-local url-http-response-status 404)
+                   (insert "HTTP/1.1 404 Not Found\n\n{\"message\":\"bad\"}"))
+                 buf)))
+            ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
+    (should-error (raindrop-api-request "/x" 'GET nil nil) :type 'user-error)))
+
+(ert-deftest raindrop-fetch-fallback-on-empty-items ()
+  (let ((calls '()))
+    (cl-letf (((symbol-function 'raindrop-api-request)
+               (lambda (endpoint &rest _)
+                 (push endpoint calls)
+                 (cond
+                  ((string= endpoint "/raindrops") '((items)))
+                  ((string= endpoint "/raindrops/0") '((items . (((_id . 1) (link . "l") (title . "t"))))))
+                  (t '((items)))))))
+      (let* ((items (apply #'raindrop-fetch (list :tags '("a") :collection 0 :limit 5 :match 'all))))
+        (should (= (length items) 1))
+        (should (member "/raindrops" calls))
+        (should (member "/raindrops/0" calls))))))
+
+(ert-deftest raindrop-debug-search-builds-search ()
+  (cl-letf (((symbol-function 'raindrop-api-request)
+             (lambda (endpoint method query &rest _)
+               (list (cons 'endpoint endpoint)
+                     (cons 'method method)
+                     (cons 'query query)))))
+    (let* ((payload (raindrop-debug-search '(foo "multi word") 0))
+           (q (alist-get 'query payload)))
+      (should (equal (alist-get 'perpage q) 5))
+      (should (string-match-p "#foo" (alist-get 'search q)))
+      (should (string-match-p "#\"multi word\"" (alist-get 'search q))))))
+
+(ert-deftest raindrop-dblock-writer-renders-empty-and-items ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+BEGIN: raindrop :tags foo :match all :limit 5\n#+END:\n")
+    (goto-char (point-min))
+    ;; Empty
+    (cl-letf (((symbol-function 'raindrop-fetch) (lambda (&rest _) nil)))
+      (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5))
+      (goto-char (point-min))
+      (should (search-forward "- No results" nil t)))
+    ;; With items
+    (erase-buffer)
+    (insert "#+BEGIN: raindrop :tags foo :match all :limit 5\n#+END:\n")
+    (goto-char (point-min))
+    (cl-letf (((symbol-function 'raindrop-fetch)
+               (lambda (&rest _)
+                 (list (list :link "https://ex.com" :title "T" :excerpt "E")))))
+      (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5))
+      (goto-char (point-min))
+      (should (search-forward "[[https://ex.com][T]] — E" nil t)))))
+
+;; New tests (edge cases & negative scenarios)
+
+(ert-deftest raindrop-sanitize-org-trims-and-flattens ()
+  (let ((s (concat "  Title\nwith\nnewlines  ")))
+    (should (equal (raindrop--sanitize-org s) "Title with newlines")))
+  (should (equal (raindrop--sanitize-org nil) nil)))
+
+(ert-deftest raindrop-endpoint-for-nil-and-all ()
+  (should (equal (raindrop--endpoint-for nil nil) "/raindrops/0"))
+  (should (equal (raindrop--endpoint-for 'all nil) "/raindrops/0"))
+  (should (equal (raindrop--endpoint-for :all t) "/raindrops")))
+
+(ert-deftest raindrop-filters-builds-query ()
+  (cl-letf (((symbol-function 'raindrop-api-request)
+             (lambda (endpoint _m query _data)
+               (list (cons 'endpoint endpoint) (cons 'query query)))))
+    (let* ((res (raindrop-filters :collection 0 :search "#foo" :tags-sort '_id))
+           (q (alist-get 'query res)))
+      (should (equal (alist-get 'tagsSort q) "_id"))
+      (should (equal (alist-get 'search q) "#foo")))))
+
+(ert-deftest raindrop-fetch-perpage-limit ()
+  (let (seen-query)
+    (cl-letf (((symbol-function 'raindrop-api-request)
+               (lambda (_e _m query _d)
+                 (setq seen-query query)
+                 '((items . ())))))
+      ;; limit below 100
+      (raindrop-fetch :tags '(a) :limit 20)
+      (should (equal (alist-get 'perpage seen-query) 20))
+      ;; limit above 100 → clamped to 100
+      (raindrop-fetch :tags '(a) :limit 1000)
+      (should (equal (alist-get 'perpage seen-query) 100)))))
+
+(ert-deftest raindrop-fetch-async-perpage-limit ()
+  (let (seen-query)
+    (cl-letf (((symbol-function 'raindrop-api-request-async)
+               (lambda (_e _m query _d cb)
+                 (setq seen-query query)
+                 (funcall cb '((items)) nil))))
+      (raindrop-fetch-async (list :tags '(a) :limit 5) (lambda (_ _)))
+      (should (equal (alist-get 'perpage seen-query) 5))
+      (raindrop-fetch-async (list :tags '(a) :limit 200) (lambda (_ _)))
+      (should (equal (alist-get 'perpage seen-query) 100)))))
+
+(ert-deftest raindrop-token-errors-and-auth-source-secret-fn ()
+  ;; Empty sources → error
+  (let ((raindrop-token-source '()))
+    (should-error (raindrop--get-token) :type 'user-error))
+  ;; Empty custom token ignored → error
+  (let ((raindrop-token-source '(custom))
+        (raindrop-custom-token ""))
+    (should-error (raindrop--get-token) :type 'user-error))
+  ;; auth-source returns function
+  (cl-letf (((symbol-function 'auth-source-search)
+             (lambda (&rest _) (list (list :secret (lambda () "AUTH")))))
+            (raindrop-token-source '(auth-source)))
+    (should (equal (raindrop--get-token) "AUTH"))))
+
+(ert-deftest raindrop-http-error-bodies-and-non-json ()
+  ;; Body with 'error key
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (_url &rest _)
+               (let ((b (generate-new-buffer " *http*")))
+                 (with-current-buffer b
+                   (setq-local url-http-response-status 400)
+                   (insert "HTTP/1.1 400 Bad\n\n{\"error\":\"boom\"}"))
+                 b)))
+            ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
+    (should-error (raindrop-api-request "/x" 'GET nil nil) :type 'user-error))
+  ;; Non-JSON body
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (_url &rest _)
+               (let ((b (generate-new-buffer " *http*")))
+                 (with-current-buffer b
+                   (setq-local url-http-response-status 500)
+                   (insert "HTTP/1.1 500 Bad\n\n<!doctype html>error"))
+                 b)))
+            ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
+    (should-error (raindrop-api-request "/x" 'GET nil nil) :type 'user-error)))
+
+(ert-deftest raindrop-api-async-network-error-status ()
+  (let (cb-result cb-err)
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (_url cb &rest _)
+                 ;; emulate :error in status plist
+                 (funcall cb (list :error '(error . "timeout")))))
+              ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
+      (raindrop-api-request-async "/x" 'GET nil nil (lambda (r e) (setq cb-result r cb-err e)))
+      (should (null cb-result))
+      (should (string-match-p "Network error" (or cb-err ""))))))
+
+(ert-deftest raindrop-parse-tags-empty-string-and-spaces ()
+  (should (equal (raindrop-parse-tags "") nil))
+  (should (equal (raindrop-parse-tags "   \t\n") nil)))
+
+(ert-deftest raindrop-dblock-reinvoke-updates-content ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+BEGIN: raindrop :tags foo :match all :limit 5\n#+END:\n")
+    (goto-char (point-min))
+    (cl-letf (((symbol-function 'raindrop-fetch)
+               (lambda (&rest _) (list (list :link "https://a" :title "A" :excerpt "1")))))
+      (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5)))
+    (goto-char (point-min))
+    (should (search-forward "[[https://a][A]] — 1" nil t))
+    ;; Re-run with different data; block should update, not duplicate
+    (goto-char (point-min))
+    (cl-letf (((symbol-function 'raindrop-fetch)
+               (lambda (&rest _) (list (list :link "https://b" :title "B" :excerpt "2")))))
+      (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5)))
+    (goto-char (point-min))
+    (should (search-forward "[[https://b][B]] — 2" nil t))
+    (should-not (search-forward "[[https://a][A]] — 1" nil t))))
+
+(ert-deftest raindrop-api-request-async-success-and-error ()
+  ;; success
+  (let (cb-result cb-err)
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (_url cb &rest _)
+                 (let ((buf (generate-new-buffer " *raindrop-async*")))
+                   (with-current-buffer buf
+                     (setq-local url-http-response-status 200)
+                     (insert "HTTP/1.1 200 OK\n\n{\"ok\":true}"))
+                   (with-current-buffer buf (funcall cb nil)))))
+              ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
+      (raindrop-api-request-async "/x" 'GET nil nil
+                                  (lambda (res err) (setq cb-result res cb-err err)))
+      (should (equal (alist-get 'ok cb-result) t))
+      (should (null cb-err))))
+  ;; http error
+  (let (cb-result cb-err)
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (_url cb &rest _)
+                 (let ((buf (generate-new-buffer " *raindrop-async*")))
+                   (with-current-buffer buf
+                     (setq-local url-http-response-status 500)
+                     (insert "HTTP/1.1 500 BOOM\n\n{}"))
+                   (with-current-buffer buf (funcall cb nil)))))
+              ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
+      (raindrop-api-request-async "/x" 'GET nil nil
+                                  (lambda (res err) (setq cb-result res cb-err err)))
+      (should (null cb-result))
+      (should (string-match-p "HTTP 500" (or cb-err ""))))))
+
+(ert-deftest raindrop-fetch-async-fallback-on-empty-items ()
+  (let ((calls '()))
+    (cl-letf (((symbol-function 'raindrop-api-request-async)
+               (lambda (endpoint _m _q _d cb)
+                 (push endpoint calls)
+                 (cond
+                  ((string= endpoint "/raindrops") (funcall cb '((items)) nil))
+                  ((string= endpoint "/raindrops/0") (funcall cb '((items . (((_id . 1) (link . \"l\") (title . \"t\"))))) nil))
+                  (t (funcall cb '((items)) nil))))))
+      (let (done items err)
+        (raindrop-fetch-async (list :tags '("a") :collection 0 :limit 5 :match 'all)
+                              (lambda (its e) (setq items its err e done t)))
+        (should done)
+        (should (= (length items) 1))
+        (should (member "/raindrops" calls))
+        (should (member "/raindrops/0" calls))))))
+
+(ert-deftest raindrop-under-heading-errors-without-tags ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Heading without tags\n")
+    (goto-char (point-min))
+    (should-error (raindrop-insert-or-update-links-under-heading) :type 'user-error)))
+
+(ert-deftest raindrop-under-heading-inserts-block-and-replaces ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Test :foo:bar:\nBody\n")
+    (goto-char (point-min))
+    ;; mock async fetch to deliver one item
+    (cl-letf (((symbol-function 'raindrop-fetch-async)
+               (lambda (_plist cb)
+                 (funcall cb (list (list :link "https://ex.com" :title "T" :excerpt "E")) nil))))
+      (raindrop-insert-or-update-links-under-heading)
+      (goto-char (point-min))
+      (should (search-forward "#+BEGIN: raindrop" nil t))
+      (should (search-forward "[[https://ex.com][T]] — E" nil t)))))
+
+;;; raindrop-core-tests.el ends here
