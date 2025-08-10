@@ -1,0 +1,6 @@
+# Byte-compiled Emacs Lisp files
+*.elc
+
+# Eldev local build/test cache
+.eldev/
+

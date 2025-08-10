@@ -15,6 +15,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Clean stale byte-compiled files
+        run: |
+          set -euo pipefail
+          echo "Removing any checked-in .elc files and .eldev cache..."
+          find . -type f -name "*.elc" -print -delete || true
+          rm -rf .eldev || true
+
       - name: Set up Emacs ${{ matrix.emacs_version }}
         uses: purcell/setup-emacs@master
         with:
@@ -28,5 +35,14 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run tests (ERT via Eldev)
-        run: eldev -dtT test
-
+        run: |
+          set -euo pipefail
+          echo "Commit:" && git log -1 --oneline
+          echo "Emacs:" && emacs --version | head -n1
+          eldev -dtT test | tee /tmp/test.log
+          count=$(grep -Eo 'Running [0-9]+ tests' /tmp/test.log | awk '{print $2}' | tail -1)
+          echo "Detected tests: ${count:-0}"
+          if [ "${count:-0}" -lt 30 ]; then
+            echo "Expected at least 30 tests; got ${count:-0}" >&2
+            exit 1
+          fi
