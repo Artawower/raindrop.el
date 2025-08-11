@@ -36,21 +36,36 @@
   '((:results . "raw replace") (:output . org-list))
   "Default header args for raindrop babel blocks.")
 
+(defun raindrop-ob--param (key params default)
+  "Return value for KEY from PARAMS or DEFAULT if not set or empty."
+  (let ((v (alist-get key params nil nil #'eq)))
+    (if (and v (not (equal v ""))) v default)))
+
+(defun raindrop-ob--items (params)
+  "Return fetched Raindrop items based on PARAMS."
+  (let* ((tags (raindrop-parse-tags (raindrop-ob--param :tags params nil)))
+         (match (or (raindrop-ob--param :match params 'all) 'all))
+         (limit (or (raindrop-ob--param :limit params raindrop-default-limit)
+                    raindrop-default-limit))
+         (collection (or (raindrop-ob--param :collection params raindrop-default-collection)
+                         raindrop-default-collection)))
+    (if tags
+        (apply #'raindrop-fetch
+               (list :tags tags :match match :limit limit :collection collection))
+      '())))
+
+(defun raindrop-ob--render (items output)
+  "Render ITEMS according to OUTPUT format."
+  (pcase output
+    ('org-list (if (null items) "- No results" (raindrop-render-org-list items)))
+    (_ (user-error "ob-raindrop: Unsupported :output %S" output))))
+
 ;;;###autoload
 (defun org-babel-execute:raindrop (_body params)
-  "Execute a Raindrop org-babel block.
-PARAMS is an alist from org-babel.
-Recognized params: :tags, :match, :collection, :limit, :output (org-list|org-table)."
-  (let* ((tags (raindrop-parse-tags (or (cdr (assoc :tags params))
-                                        (alist-get :tags params))))
-         (match (or (cdr (assoc :match params)) 'all))
-         (limit (or (cdr (assoc :limit params)) raindrop-default-limit))
-         (collection (cdr (assoc :collection params)))
-         (output (or (cdr (assoc :output params)) 'org-list))
-         (items (if tags (apply #'raindrop-fetch (list :tags tags :match match :limit limit :collection (or collection raindrop-default-collection))) '())))
-    (pcase output
-      ('org-list (if (null items) "- No results" (raindrop-render-org-list items)))
-      (_ (user-error "ob-raindrop: Unsupported :output %S" output)))))
+  "Execute a Raindrop org-babel block with PARAMS."
+  (let* ((output (or (raindrop-ob--param :output params 'org-list) 'org-list))
+         (items (raindrop-ob--items params)))
+    (raindrop-ob--render items output)))
 
 (provide 'ob-raindrop)
 

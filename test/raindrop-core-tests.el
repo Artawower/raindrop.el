@@ -32,11 +32,8 @@
                    (string-join (list "match:OR" "#foo" "#\"multi word\"" "#bar") " ")))))
 
 (ert-deftest raindrop-endpoint-for-selection ()
-  ;; No search: collection 0 -> /raindrops/0
   (should (equal (raindrop--endpoint-for 0 nil) "/raindrops/0"))
-  ;; Search present and collection 0 -> /raindrops
   (should (equal (raindrop--endpoint-for 0 t) "/raindrops"))
-  ;; Specific collection regardless of search -> /raindrops/<id>
   (should (equal (raindrop--endpoint-for 5 t) "/raindrops/5"))
   (should (equal (raindrop--endpoint-for 5 nil) "/raindrops/5")))
 
@@ -46,12 +43,11 @@
   (should (equal (raindrop--filters-endpoint 7) "/filters/7")))
 
 (ert-deftest raindrop-render-org-list-basic ()
-  (let* ((items (list (list :link "https://ex.com" :title "Title" :excerpt "Desc")))
-         (out (raindrop-render-org-list items)))
-    (should (string-match-p "^- \\[\\[https://ex\\.com\\]\\[Title\\]\\]" out))
-    (should (string-match-p " — Desc$" out))))
-
-;; Additional coverage and negative scenarios
+  (let ((raindrop-org-excerpt-next-line t))
+    (let* ((items (list (list :link "https://ex.com" :title "Title" :excerpt "Desc")))
+           (out (raindrop-render-org-list items)))
+      (should (string-match-p "^- \\[\\[https://ex\\.com\\]\\[Title\\]\\]" out))
+      (should (string-match-p "\n   Desc$" out)))))
 
 (ert-deftest raindrop-mask-secret ()
   (should (equal (raindrop--mask "short") "******"))
@@ -69,12 +65,10 @@
     (should (equal (alist-get :id it) 1))))
 
 (ert-deftest raindrop-get-token-precedence ()
-  ;; custom should win if placed first
   (let ((raindrop-token-source '(custom env auth-source))
         (raindrop-custom-token "CUST")
         (getenv (lambda (_k) "ENV")))
     (should (equal (raindrop--get-token) "CUST")))
-  ;; env should win over auth-source
   (cl-letf* (((symbol-function 'getenv) (lambda (_k) "ENV"))
              ((symbol-function 'auth-source-search)
               (lambda (&rest _)
@@ -83,7 +77,6 @@
     (should (equal (raindrop--get-token) "ENV"))))
 
 (ert-deftest raindrop-api-request-success-and-error ()
-  ;; Success path
   (cl-letf (((symbol-function 'url-retrieve-synchronously)
              (lambda (_url &rest _)
                (let ((buf (generate-new-buffer " *raindrop-test*")))
@@ -95,7 +88,6 @@
     (let ((res (raindrop-api-request "/x" 'GET nil nil)))
       (should (eq (alist-get 'ok res) t))
       (should (equal (alist-get 'items res) '(1 2)))))
-  ;; Error path with message in body
   (cl-letf (((symbol-function 'url-retrieve-synchronously)
              (lambda (_url &rest _)
                (let ((buf (generate-new-buffer " *raindrop-test*")))
@@ -137,28 +129,26 @@
     (org-mode)
     (insert "#+BEGIN: raindrop :tags foo :match all :limit 5\n#+END:\n")
     (goto-char (point-min))
-    ;; Empty
-    (cl-letf (((symbol-function 'raindrop-fetch) (lambda (&rest _) nil)))
-      (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5))
+    (let ((raindrop-org-excerpt-next-line t))
+      (cl-letf (((symbol-function 'raindrop-fetch) (lambda (&rest _) nil)))
+        (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5))
+        (goto-char (point-min))
+        (should (search-forward "- No results" nil t)))
+      (erase-buffer)
+      (insert "#+BEGIN: raindrop :tags foo :match all :limit 5\n#+END:\n")
       (goto-char (point-min))
-      (should (search-forward "- No results" nil t)))
-    ;; With items
-    (erase-buffer)
-    (insert "#+BEGIN: raindrop :tags foo :match all :limit 5\n#+END:\n")
-    (goto-char (point-min))
-    (cl-letf (((symbol-function 'raindrop-fetch)
-               (lambda (&rest _)
-                 (list (list :link "https://ex.com" :title "T" :excerpt "E")))))
-      (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5))
-      (goto-char (point-min))
-      (should (search-forward "[[https://ex.com][T]] — E" nil t)))))
-
-;; New tests (edge cases & negative scenarios)
+      (cl-letf (((symbol-function 'raindrop-fetch)
+                 (lambda (&rest _)
+                   (list (list :link "https://ex.com" :title "T" :excerpt "E")))))
+        (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5))
+        (goto-char (point-min))
+        (should (search-forward "[[https://ex.com][T]]" nil t))
+        (should (search-forward "\n   E" nil t))))))
 
 (ert-deftest raindrop-sanitize-org-trims-and-flattens ()
   (let ((s (concat "  Title\nwith\nnewlines  ")))
-    (should (equal (raindrop--sanitize-org s) "Title with newlines")))
-  (should (equal (raindrop--sanitize-org nil) nil)))
+    (should (equal (raindrop-org--sanitize s) "Title with newlines")))
+  (should (equal (raindrop-org--sanitize nil) nil)))
 
 (ert-deftest raindrop-endpoint-for-nil-and-all ()
   (should (equal (raindrop--endpoint-for nil nil) "/raindrops/0"))
@@ -180,10 +170,8 @@
                (lambda (_e _m query _d)
                  (setq seen-query query)
                  '((items . ())))))
-      ;; limit below 100
       (raindrop-fetch :tags '(a) :limit 20)
       (should (equal (alist-get 'perpage seen-query) 20))
-      ;; limit above 100 → clamped to 100
       (raindrop-fetch :tags '(a) :limit 1000)
       (should (equal (alist-get 'perpage seen-query) 100)))))
 
@@ -199,21 +187,17 @@
       (should (equal (alist-get 'perpage seen-query) 100)))))
 
 (ert-deftest raindrop-token-errors-and-auth-source-secret-fn ()
-  ;; Empty sources → error
   (let ((raindrop-token-source '()))
     (should-error (raindrop--get-token) :type 'user-error))
-  ;; Empty custom token ignored → error
   (let ((raindrop-token-source '(custom))
         (raindrop-custom-token ""))
     (should-error (raindrop--get-token) :type 'user-error))
-  ;; auth-source returns function
   (cl-letf (((symbol-function 'auth-source-search)
              (lambda (&rest _) (list (list :secret (lambda () "AUTH")))))
             (raindrop-token-source '(auth-source)))
     (should (equal (raindrop--get-token) "AUTH"))))
 
 (ert-deftest raindrop-http-error-bodies-and-non-json ()
-  ;; Body with 'error key
   (cl-letf (((symbol-function 'url-retrieve-synchronously)
              (lambda (_url &rest _)
                (let ((b (generate-new-buffer " *http*")))
@@ -223,7 +207,6 @@
                  b)))
             ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
     (should-error (raindrop-api-request "/x" 'GET nil nil) :type 'user-error))
-  ;; Non-JSON body
   (cl-letf (((symbol-function 'url-retrieve-synchronously)
              (lambda (_url &rest _)
                (let ((b (generate-new-buffer " *http*")))
@@ -238,7 +221,6 @@
   (let (cb-result cb-err)
     (cl-letf (((symbol-function 'url-retrieve)
                (lambda (_url cb &rest _)
-                 ;; emulate :error in status plist
                  (funcall cb (list :error '(error . "timeout")))))
               ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
       (raindrop-api-request-async "/x" 'GET nil nil (lambda (r e) (setq cb-result r cb-err e)))
@@ -254,22 +236,23 @@
     (org-mode)
     (insert "#+BEGIN: raindrop :tags foo :match all :limit 5\n#+END:\n")
     (goto-char (point-min))
-    (cl-letf (((symbol-function 'raindrop-fetch)
-               (lambda (&rest _) (list (list :link "https://a" :title "A" :excerpt "1")))))
-      (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5)))
-    (goto-char (point-min))
-    (should (search-forward "[[https://a][A]] — 1" nil t))
-    ;; Re-run with different data; block should update, not duplicate
-    (goto-char (point-min))
-    (cl-letf (((symbol-function 'raindrop-fetch)
-               (lambda (&rest _) (list (list :link "https://b" :title "B" :excerpt "2")))))
-      (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5)))
-    (goto-char (point-min))
-    (should (search-forward "[[https://b][B]] — 2" nil t))
-    (should-not (search-forward "[[https://a][A]] — 1" nil t))))
+    (let ((raindrop-org-excerpt-next-line t))
+      (cl-letf (((symbol-function 'raindrop-fetch)
+                 (lambda (&rest _) (list (list :link "https://a" :title "A" :excerpt "1")))))
+        (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5)))
+      (goto-char (point-min))
+      (should (search-forward "[[https://a][A]]" nil t))
+      (should (search-forward "\n   1" nil t))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'raindrop-fetch)
+                 (lambda (&rest _) (list (list :link "https://b" :title "B" :excerpt "2")))))
+        (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5)))
+      (goto-char (point-min))
+      (should (search-forward "[[https://b][B]]" nil t))
+      (should (search-forward "\n   2" nil t))
+      (should-not (search-forward "[[https://a][A]]" nil t)))))
 
 (ert-deftest raindrop-api-request-async-success-and-error ()
-  ;; success
   (let (cb-result cb-err)
     (cl-letf (((symbol-function 'url-retrieve)
                (lambda (_url cb &rest _)
@@ -283,7 +266,6 @@
                                   (lambda (res err) (setq cb-result res cb-err err)))
       (should (equal (alist-get 'ok cb-result) t))
       (should (null cb-err))))
-  ;; http error
   (let (cb-result cb-err)
     (cl-letf (((symbol-function 'url-retrieve)
                (lambda (_url cb &rest _)
@@ -327,16 +309,15 @@
     (org-mode)
     (insert "* Test :foo:bar:\nBody\n")
     (goto-char (point-min))
-    ;; mock async fetch to deliver one item
-    (cl-letf (((symbol-function 'raindrop-fetch-async)
-               (lambda (_plist cb)
-                 (funcall cb (list (list :link "https://ex.com" :title "T" :excerpt "E")) nil))))
-      (raindrop-insert-or-update-links-under-heading)
-      (goto-char (point-min))
-      (should (search-forward "#+BEGIN: raindrop" nil t))
-      (should (search-forward "[[https://ex.com][T]] — E" nil t)))))
-
-;; Folders support new tests
+    (let ((raindrop-org-excerpt-next-line t))
+      (cl-letf (((symbol-function 'raindrop-fetch-async)
+                 (lambda (_plist cb)
+                   (funcall cb (list (list :link "https://ex.com" :title "T" :excerpt "E")) nil))))
+        (raindrop-insert-or-update-links-under-heading)
+        (goto-char (point-min))
+        (should (search-forward "#+BEGIN: raindrop" nil t))
+        (should (search-forward "[[https://ex.com][T]]" nil t))
+        (should (search-forward "\n   E" nil t))))))
 
 (ert-deftest raindrop-quote-folder-basic-and-spaces ()
   (should (equal (raindrop--quote-folder 'Work) "collection:Work"))
@@ -346,11 +327,11 @@
   (let* ((s-all (raindrop--build-search '("t1") '("Folder A") 'all))
          (s-any (raindrop--build-search '("t1") '("Folder A") 'any)))
     (should (string-match-p "#t1" s-all))
-    (should (string-match-p "collection:\\"Folder A\\"" s-all))
+    (should (string-match-p "collection:\\\"Folder A\\\"" s-all))
     (should (not (string-match-p "match:OR" s-all)))
     (should (string-match-p "^match:OR" s-any))
     (should (string-match-p "#t1" s-any))
-    (should (string-match-p "collection:\\"Folder A\\"" s-any))))
+    (should (string-match-p "collection:\\\"Folder A\\\"" s-any))))
 
 (ert-deftest raindrop-dblock-accepts-folder-param ()
   (with-temp-buffer
@@ -363,7 +344,102 @@
                    (setq saw-folders (plist-get plist :folders))
                    nil)))
         (org-dblock-write:raindrop '(:folder "Folder A" :match all :limit 5))
-        (should (equal saw-folders '("Folder A"))))))
+        (should (equal saw-folders '("Folder A")))))))
+
+
+;;; smart grouping tests
+
+(ert-deftest raindrop-smart-eligible-tags-respects-min-and-stop ()
+  (let* ((items (list
+                 (list :tags '("ascii" "cli"))
+                 (list :tags '("ascii" "cli"))
+                 (list :tags '("file manager" "cli"))
+                 (list :tags '("file manager"))
+                 (list :tags '("unique"))))
+         (raindrop-org-smart-min-count 2)
+         (raindrop-org-smart-max-groups 8)
+         (raindrop-org-smart-stop-tags '("cli"))
+         (freqs (raindrop-org--tag-frequencies items))
+         (selected (raindrop-org--eligible-tags freqs)))
+    (should (member "ascii" selected))
+    (should (member "file manager" selected))
+    (should-not (member "cli" selected))
+    (should-not (member "unique" selected))))
+
+(ert-deftest raindrop-smart-max-groups-cap ()
+  (let* ((items (mapcar (lambda (i)
+                          ;; 20 тегов t1..t20, каждый встречается два раза
+                          (list :tags (list (format "t%d" (1+ (/ i 2))))))
+                        (number-sequence 0 39)))
+         (raindrop-org-smart-min-count 2)
+         (raindrop-org-smart-max-groups 5)
+         (raindrop-org-smart-stop-tags '())
+         (freqs (raindrop-org--tag-frequencies items))
+         (selected (raindrop-org--eligible-tags freqs)))
+    (should (= (length selected) 5))))
+
+(ert-deftest raindrop-smart-group-items-auto-basic ()
+  (let* ((items (list
+                 (list :link "https://a" :title "Yazi"   :tags '("file manager" "cli" "tui"))
+                 (list :link "https://b" :title "ncdu"   :tags '("file manager" "cli"))
+                 (list :link "https://c" :title "toilet" :tags '("ascii" "cli"))
+                 (list :link "https://d" :title "figlet" :tags '("ascii" "cli"))
+                 (list :link "https://e" :title "misc"   :tags '("rare"))))
+         (raindrop-org-smart-min-count 2)
+         (raindrop-org-smart-max-groups 8)
+         (raindrop-org-smart-stop-tags '("cli"))
+         (groups (raindrop-org--group-items-auto items)))
+    (let ((names (mapcar #'car groups)))
+      (should (member "Ascii" names))
+      (should (member "File manager" names))
+      (should (member "Other" names)))
+    (let* ((ascii (assoc "Ascii" groups))
+           (fm    (assoc "File manager" groups))
+           (other (assoc "Other" groups)))
+      (should (= (length (cdr ascii)) 2))
+      (should (= (length (cdr fm)) 2))
+      (should (= (length (cdr other)) 1))
+      (let* ((it (car (cdr other)))
+             (lnk (or (plist-get it :link) (alist-get :link it))))
+        (should (equal lnk "https://e"))))))
+
+(ert-deftest raindrop-smart-render-grouped-respects-heading-level ()
+  (let* ((items (list
+                 (list :link "https://a" :title "A" :tags '("x" "cli"))
+                 (list :link "https://b" :title "B" :tags '("x"))
+                 (list :link "https://c" :title "C" :tags '("y"))))
+         (raindrop-org-smart-min-count 2)
+         (raindrop-org-smart-stop-tags '("cli"))
+         (raindrop-org-smart-heading-level 2)
+         (org (raindrop-org--render-grouped
+               (raindrop-org--group-items-auto items))))
+    (should (string-match-p "^\\*\\* X$" org))
+    (should (string-match-p "^- \\[\\[https://a\\]\\[A\\]\\]" org))
+    (should (string-match-p "^- \\[\\[https://b\\]\\[B\\]\\]" org))
+    (should (string-match-p "^\\*\\* Other$" org))
+    (should (string-match-p "\\[\\[https://c\\]\\[C\\]\\]" org))))
+
+(ert-deftest raindrop-dblock-smart-flag-produces-headings ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+BEGIN: raindrop :tags foo :match all :limit 5 :smart t\n#+END:\n")
+    (goto-char (point-min))
+    (let ((raindrop-org-smart-min-count 1)
+          (raindrop-org-smart-stop-tags '())
+          (raindrop-org-smart-heading-level 3))
+      (cl-letf (((symbol-function 'raindrop-fetch)
+                 (lambda (&rest _)
+                   (list
+                    (list :link "https://a" :title "A" :tags '("alpha"))
+                    (list :link "https://b" :title "B" :tags '("beta"))))))
+        (org-dblock-write:raindrop '(:tags "foo" :match all :limit 5 :smart t))
+        (goto-char (point-min))
+        (should (search-forward "*** Alpha" nil t))
+        (should (search-forward "*** Beta" nil t))
+        ;; Ссылки как таковые
+        (goto-char (point-min))
+        (should (re-search-forward "\\[\\[https://a\\]\\[A\\]\\]" nil t))
+        (goto-char (point-min))
+        (should (re-search-forward "\\[\\[https://b\\]\\[B\\]\\]" nil t))))))
 
 ;;; raindrop-core-tests.el ends here
-

@@ -24,7 +24,7 @@
 ;;; Commentary:
 ;; Raindrop → Org integration utilities and API client.
 ;; - url.el-based client with Bearer token.
-;; - Fetch bookmarks by tags/collection with basic pagination.
+;; - Fetch bookmarks by tags/collection with basic pagination (one page by default).
 ;; - Shared utilities for renderers and org integrations.
 
 ;;; Code:
@@ -35,6 +35,8 @@
 (require 'auth-source)
 (require 'json)
 (require 'seq)
+(require 'subr-x)  ;; string-trim, string-empty-p, when-let, if-let
+(require 'rx)
 
 (defgroup raindrop nil
   "Raindrop → Org integration."
@@ -75,7 +77,7 @@ Avoid storing secrets in plain files; prefer auth-source."
   :group 'raindrop)
 
 (defcustom raindrop-default-limit 100
-  "Default maximum number of items to fetch."
+  "Default maximum number of items to fetch (single page up to 100)."
   :type 'integer
   :group 'raindrop)
 
@@ -92,11 +94,14 @@ collection."
   :type 'boolean
   :group 'raindrop)
 
-(defconst raindrop--user-agent "raindrop.el/0.1.0 (+https://github.com/artawower/raindrop.el)"
+(defconst raindrop--user-agent
+  "raindrop.el/0.1.0 (+https://github.com/artawower/raindrop.el)"
   "User-Agent header for Raindrop requests.")
 
 (defvar raindrop--collections-cache nil
   "Cached list of collections as returned by `/collections` (value of 'items).")
+
+;;;; Small helpers (pure where possible)
 
 (defun raindrop--mask (s)
   "Return masked version of secret string S for logs."
@@ -107,9 +112,7 @@ collection."
        (t (concat (substring s 0 3) (make-string (- n 6) ?*) (substring s (- n 3))))))))
 
 (defun raindrop--get-token-from-auth-source ()
-  "Retrieve token from auth-source using configured hosts.
-Tries each host from `raindrop-auth-source-hosts`, then falls back to
-`raindrop-auth-source-host` for compatibility."
+  "Retrieve token from auth-source using configured hosts."
   (let* ((hosts (append (and (listp raindrop-auth-source-hosts)
                              raindrop-auth-source-hosts)
                         (list raindrop-auth-source-host)))
@@ -145,7 +148,6 @@ Tries each host from `raindrop-auth-source-hosts`, then falls back to
            (throw 'done raindrop-custom-token)))))
     (user-error "raindrop.el: Token not found. Configure auth-source or RAINDROP_TOKEN.")))
 
-;; Tags/folders parsing utilities
 (defun raindrop-parse-tags (tags)
   "Normalize TAGS param to a list of strings.
 Accepts list of symbols/strings or a string. The string form supports:
@@ -159,7 +161,6 @@ Prefer quoting for tags containing spaces or commas."
     (seq-filter (lambda (s) (and (stringp s) (> (length s) 0)))
                 (mapcar (lambda (tag) (if (symbolp tag) (symbol-name tag) tag)) tags)))
    ((stringp tags)
-    (require 'rx)
     (let* ((s (string-trim tags))
            (has-comma (string-match-p "," s))
            (re (if has-comma
@@ -183,10 +184,25 @@ Prefer quoting for tags containing spaces or commas."
         (nreverse out))))
    (t (list (format "%s" tags)))))
 
+;; replace the existing raindrop-parse-folders with this version
 (defun raindrop-parse-folders (folders)
-  "Normalize FOLDERS param to a list of strings.
-Accepts same formats as `raindrop-parse-tags` (list, comma/space-separated string)."
-  (raindrop-parse-tags folders))
+  "Normalize FOLDERS to a list of strings.
+A single string is preserved verbatim (even if it contains spaces).
+If the string contains commas, it is split on commas with quote support.
+A list is normalized element-wise."
+  (cond
+   ((null folders) nil)
+   ((listp folders)
+    (seq-filter (lambda (s) (and (stringp s) (> (length s) 0)))
+                (mapcar (lambda (f) (if (symbolp f) (symbol-name f) f)) folders)))
+   ((stringp folders)
+    (let* ((s (string-trim folders)))
+      (cond
+       ((string-empty-p s) nil)
+       ((string-match-p "," s)
+        (raindrop-parse-tags s))
+       (t (list s)))))
+   (t (list (format "%s" folders)))))
 
 (defun raindrop--build-query (params)
   "Build URL query string from PARAMS alist ((key . value) ...)."
@@ -194,7 +210,8 @@ Accepts same formats as `raindrop-parse-tags` (list, comma/space-separated strin
                (format "%s=%s"
                        (url-hexify-string (format "%s" (car kv)))
                        (url-hexify-string (format "%s" (cdr kv)))))
-             params "&"))
+             (seq-filter (lambda (kv) (cdr kv)) params)
+             "&"))
 
 (defun raindrop--url (endpoint &optional query-alist)
   "Compose full URL for ENDPOINT with QUERY-ALIST."
@@ -204,22 +221,15 @@ Accepts same formats as `raindrop-parse-tags` (list, comma/space-separated strin
             (concat "?" (raindrop--build-query query-alist)))))
 
 (defun raindrop--collection-endpoint (collection)
-  "Return the base endpoint for listing by COLLECTION.
-For a specific collection: `/raindrops/<id>`; for “all collections”: `/raindrops/0`.
-
-Note: global search across all collections should use `/raindrops` (no ID).
-Use `raindrop--endpoint-for` to choose when a search is present."
+  "Return the base endpoint for listing by COLLECTION."
   (let* ((id (cond
               ((numberp collection) collection)
               ((or (eq collection 'all) (eq collection :all) (null collection)) raindrop-default-collection)
               (t raindrop-default-collection))))
-    (let ((cid (if (<= id 0) 0 id)))
-      (format "/raindrops/%s" cid))))
+    (format "/raindrops/%s" (if (<= id 0) 0 id))))
 
 (defun raindrop--endpoint-for (collection search-present)
-  "Pick the correct endpoint given COLLECTION and search presence.
-If `search-present` and COLLECTION refers to “all collections” (<= 0), use the
-global `/raindrops` (no ID); otherwise use `/raindrops/<id>`."
+  "Pick the correct endpoint given COLLECTION and SEARCH-PRESENT."
   (let* ((id (cond
               ((numberp collection) collection)
               ((or (eq collection 'all) (eq collection :all) (null collection)) raindrop-default-collection)
@@ -250,16 +260,60 @@ global `/raindrops` (no ID); otherwise use `/raindrops/<id>`."
                           items)))
     (alist-get '_id match)))
 
+;;;; HTTP helpers (small, focused)
+
+(defun raindrop--make-headers (method)
+  "Return an alist of HTTP headers for METHOD."
+  (let ((headers `(("Authorization" . ,(concat "Bearer " (raindrop--get-token)))
+                   ("Accept" . "application/json")
+                   ("User-Agent" . ,raindrop--user-agent))))
+    (if (eq method 'GET)
+        headers
+      (append headers '(("Content-Type" . "application/json"))))))
+
+(defun raindrop--buffer-http-status ()
+  "Extract HTTP status code from current buffer."
+  (or (and (boundp 'url-http-response-status) url-http-response-status)
+      (save-excursion
+        (goto-char (point-min))
+        (when (re-search-forward "^HTTP/[^ ]+ \$begin:math:text$[0-9]+\\$end:math:text$" nil t)
+          (string-to-number (match-string 1))))))
+
+(defun raindrop--goto-body ()
+  "Move point to start of HTTP response body in current buffer."
+  (goto-char (point-min))
+  (re-search-forward "^$" nil 'move))
+
+(defun raindrop--json-from-point ()
+  "Parse JSON from point to buffer end, returning alist or signal user-error."
+  (let ((json-object-type 'alist)
+        (json-array-type 'list)
+        (json-key-type 'symbol))
+    (condition-case err
+        (json-parse-buffer :object-type 'alist :array-type 'list :null-object nil :false-object :json-false)
+      (error (user-error "raindrop.el: JSON parse error: %s" (cadr err))))))
+
+(defun raindrop--error-message-from-body ()
+  "Attempt to parse a human-friendly error message from body."
+  (let ((body (buffer-substring-no-properties (point) (point-max))))
+    (condition-case _
+        (let* ((obj (ignore-errors
+                      (json-parse-string body :object-type 'alist :array-type 'list :null-object nil :false-object :json-false)))
+               (msg (or (alist-get 'message obj)
+                        (alist-get 'error obj)
+                        (alist-get 'errorMessage obj))))
+          (and msg (format "%s" msg)))
+      (error nil))))
+
+;;;; Request primitives (sync / async) using helpers
+
 (defun raindrop-api-request (endpoint &optional method query-alist data)
-  "Perform HTTP request to Raindrop API.
-ENDPOINT like /raindrops/0. METHOD is a symbol 'GET (default), 'POST, etc.
-QUERY-ALIST is appended to URL. DATA (string) is sent as body for non-GET.
-Returns parsed JSON as alist. Signals user-error on HTTP or parse errors."
-  (let* ((url-request-method (upcase (symbol-name (or method 'GET))))
-         (url-request-extra-headers `(("Authorization" . ,(concat "Bearer " (raindrop--get-token)))
-                                      ("Content-Type" . "application/json")
-                                      ("User-Agent" . ,raindrop--user-agent)))
-         (url-request-data (and (not (equal url-request-method "GET")) data))
+  "Perform HTTP request to Raindrop API (synchronous).
+Return parsed JSON as alist. Signal `user-error` for HTTP or parse errors."
+  (let* ((method (or method 'GET))
+         (url-request-method (upcase (symbol-name method)))
+         (url-request-extra-headers (raindrop--make-headers method))
+         (url-request-data (and (not (eq method 'GET)) data))
          (url-show-status nil)
          (request-url (raindrop--url endpoint query-alist))
          (buf (let ((url-request-timeout raindrop-request-timeout))
@@ -270,49 +324,23 @@ Returns parsed JSON as alist. Signals user-error on HTTP or parse errors."
       (user-error "raindrop.el: Network error (no buffer)"))
     (unwind-protect
         (with-current-buffer buf
-          (goto-char (point-min))
-          (let ((status-code (or (and (boundp 'url-http-response-status)
-                                      url-http-response-status)
-                                 (progn
-                                   (when (re-search-forward "^HTTP/[^ ]+ \([0-9]+\)" nil t)
-                                     (string-to-number (match-string 1)))))))
-            (when raindrop-debug-enable
-              (message "raindrop.el: [sync] HTTP %s for %s" status-code endpoint))
-            ;; Move to body start
-            (re-search-forward "^$" nil 'move)
-            ;; If non-2xx, try to parse error message body to aid diagnostics
+          (let ((status-code (raindrop--buffer-http-status)))
+            (raindrop--goto-body)
             (unless (and status-code (<= 200 status-code) (< status-code 300))
-              (let (body err-text)
-                (setq body (buffer-substring-no-properties (point) (point-max)))
-                (condition-case _
-                    (let* ((json-object-type 'alist)
-                           (json-array-type 'list)
-                           (json-key-type 'symbol)
-                           (obj (ignore-errors (json-parse-string body :object-type 'alist :array-type 'list :null-object nil :false-object :json-false)))
-                           (msg (or (alist-get 'message obj)
-                                    (alist-get 'error obj)
-                                    (alist-get 'errorMessage obj))))
-                      (setq err-text (and msg (format "%s" msg))))
-                  (error (setq err-text nil)))
+              (let ((err-text (raindrop--error-message-from-body)))
                 (user-error "raindrop.el: HTTP %s for %s%s"
                             status-code endpoint
                             (if err-text (format ": %s" err-text) ""))))
-            (let ((json-object-type 'alist)
-                  (json-array-type 'list)
-                  (json-key-type 'symbol))
-              (condition-case err
-                  (json-parse-buffer :object-type 'alist :array-type 'list :null-object nil :false-object :json-false)
-                (error (user-error "raindrop.el: JSON parse error: %s" (cadr err)))))))
+            (raindrop--json-from-point)))
       (when (buffer-live-p buf) (kill-buffer buf)))))
 
 (defun raindrop-api-request-async (endpoint &optional method query-alist data callback)
   "Asynchronous HTTP request to Raindrop API.
 CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil."
-  (let* ((url-request-method (upcase (symbol-name (or method 'GET))))
-         (url-request-extra-headers `(("Authorization" . ,(concat "Bearer " (raindrop--get-token)))
-                                      ("Content-Type" . "application/json")
-                                      ("User-Agent" . ,raindrop--user-agent)))
-         (url-request-data (and (not (equal url-request-method "GET")) data))
+  (let* ((method (or method 'GET))
+         (url-request-method (upcase (symbol-name method)))
+         (url-request-extra-headers (raindrop--make-headers method))
+         (url-request-data (and (not (eq method 'GET)) data))
          (url-show-status nil)
          (full-url (raindrop--url endpoint query-alist))
          (cb (or callback #'ignore)))
@@ -326,36 +354,33 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
                  (let ((err-info (plist-get status :error)))
                    (if err-info
                        (setq err (format "Network error: %S" err-info))
-                     (goto-char (point-min))
-                     (let ((status-code (or (and (boundp 'url-http-response-status)
-                                                 url-http-response-status)
-                                            (progn
-                                              (when (re-search-forward "^HTTP/[^ ]+ \([0-9]+\)" nil t)
-                                                (string-to-number (match-string 1)))))))
+                     (let ((status-code (raindrop--buffer-http-status)))
                        (when raindrop-debug-enable
                          (message "raindrop.el: [async] %s %s -> HTTP %s" url-request-method full-url status-code))
+                       (raindrop--goto-body)
                        (if (not (and status-code (<= 200 status-code) (< status-code 300)))
-                           (setq err (format "HTTP %s for %s" status-code endpoint))
-                         (re-search-forward "^$" nil 'move)
+                           (let ((err-text (raindrop--error-message-from-body)))
+                             (setq err (format "HTTP %s for %s%s"
+                                               status-code endpoint
+                                               (if err-text (format ": %s" err-text) ""))))
                          (condition-case e
-                             (let ((json-object-type 'alist)
-                                   (json-array-type 'list)
-                                   (json-key-type 'symbol))
-                               (setq result (json-parse-buffer :object-type 'alist :array-type 'list :null-object nil :false-object :json-false)))
-                           (error (setq err (format "JSON parse error: %s" (cadr e)))))))))
+                             (setq result (raindrop--json-from-point))
+                           (error (setq err (error-message-string e))))))))
                  (when (buffer-live-p (current-buffer)) (kill-buffer (current-buffer))))
-             (funcall cb result err)))
-         nil t t)))))
+             (funcall cb result err))))
+       nil t t))))
+
+;;;; Search building
 
 (defun raindrop--quote-tag (tag)
-  "Convert tag name T to a Raindrop search token: #tag or #\"multi word\"."
+  "Convert TAG to Raindrop search token: #tag or #\"multi word\"."
   (let ((s (if (symbolp tag) (symbol-name tag) tag)))
     (if (string-match-p "[\t\n\r ]" s)
         (concat "#\"" (replace-regexp-in-string "\"" "\\\"" s) "\"")
       (concat "#" s))))
 
 (defun raindrop--quote-folder (name)
-  "Convert folder NAME to a Raindrop search token: collection:NAME or collection:\"multi word\"."
+  "Convert folder NAME to token: collection:NAME or collection:\"multi word\"."
   (let ((s (if (symbolp name) (symbol-name name) name)))
     (if (string-match-p "[\t\n\r ]" s)
         (concat "collection:\"" (replace-regexp-in-string "\"" "\\\"" s) "\"")
@@ -374,9 +399,10 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
       (_    (string-join terms " ")))))
 
 (defun raindrop--build-tag-search (tags match)
-  "Build a search string for TAGS honoring MATCH ('all|'any).
-Kept for backward compatibility; delegates to `raindrop--build-search`."
+  "Build a search string for TAGS honoring MATCH ('all|'any)."
   (raindrop--build-search tags nil match))
+
+;;;; Normalization
 
 (defun raindrop--normalize-item (raw)
   "Normalize RAW Raindrop item alist into a simpler alist."
@@ -395,118 +421,107 @@ Kept for backward compatibility; delegates to `raindrop--build-search`."
           (cons :tags tags)
           (cons :domain domain)
           (cons :created created)
-          (cons :collection collection))) )
+          (cons :collection collection))))
+
+(defun raindrop--normalize-items (items)
+  "Normalize a list of raw ITEMS."
+  (mapcar #'raindrop--normalize-item (if (and items (listp items)) items '())))
+
+;;;; Query planning (shared between sync/async)
+
+(defun raindrop--plan (plist)
+  "Build a plan from PLIST and return a plist:
+:tags :folders :search-present :endpoint :query :coll-id :alt-endpoint"
+  (let* ((tags (plist-get plist :tags))
+         (folders (or (plist-get plist :folders)
+                      (let ((f (plist-get plist :folder))) (and f (list f)))))
+         (collection (or (plist-get plist :collection) raindrop-default-collection))
+         (limit (or (plist-get plist :limit) raindrop-default-limit))
+         (match (or (plist-get plist :match) 'all))
+         (tags* (and tags (if (listp tags) tags (list tags))))
+         (folders* (and folders (if (listp folders) folders (list folders))))
+         (resolved-coll (and folders* (= (length folders*) 1)
+                             (let ((cid (raindrop--resolve-collection-id (car folders*))))
+                               (and (integerp cid) (> cid 0) cid))))
+         (effective-coll (or resolved-coll collection))
+         (search (and (or tags* (and folders* (not resolved-coll)))
+                      (raindrop--build-search tags* (and (not resolved-coll) folders*) match)))
+         (endpoint (raindrop--endpoint-for effective-coll (and search t)))
+         (query `((perpage . ,(min limit 100))
+                  ,@(when search `((search . ,search)))))
+         (coll-id (cond
+                   ((numberp effective-coll) effective-coll)
+                   ((or (eq effective-coll 'all) (eq effective-coll :all) (null effective-coll)) raindrop-default-collection)
+                   (t raindrop-default-collection)))
+         (alt (and (<= coll-id 0) search
+                   (if (string= endpoint "/raindrops") "/raindrops/0" "/raindrops"))))
+    (list :tags tags* :folders folders* :search-present (and search t)
+          :endpoint endpoint :query query :coll-id coll-id :alt-endpoint alt)))
+
+;;;; Public fetching API
 
 (defun raindrop-fetch (&rest plist)
   "Fetch raindrops according to PLIST keys:
-:tags (list of strings/symbols), :folders (list of strings) or :folder (string), :collection (number or 0 for all),
-:limit (int), :sort (symbol), :match ('all|'any). Returns list of normalized items."
-  (message "fetch params: %s" plist)
-  (let* ((tags (plist-get plist :tags))
-         (folders (or (plist-get plist :folders)
-                      (let ((f (plist-get plist :folder))) (and f (list f)))))
-         (collection (or (plist-get plist :collection) raindrop-default-collection))
-         (limit (or (plist-get plist :limit) raindrop-default-limit))
-         (match (or (plist-get plist :match) 'all))
-         (tags* (and tags (if (listp tags) tags (list tags))))
-         (folders* (and folders (if (listp folders) folders (list folders))))
-         (resolved-coll (and folders* (= (length folders*) 1)
-                             (let ((cid (raindrop--resolve-collection-id (car folders*))))
-                               (and (integerp cid) (> cid 0) cid))))
-         (effective-coll (or resolved-coll collection))
-         (search (and (or tags* (and folders* (not resolved-coll)))
-                      (raindrop--build-search tags* (and (not resolved-coll) folders*) match)))
-         (endpoint (raindrop--endpoint-for effective-coll (and search t)))
-         ;; perpage: up to 100. We’ll loop pages if needed later; MVP fetches one page.
-         (query `((perpage . ,(min limit 100))
-                  ,@(when search `((search . ,search)))))
-         payload items coll-id alt-endpoint alt-payload alt-items)
+:tags (list or string), :folders (list/string) or :folder (string),
+:collection (number or 0 for all), :limit (int), :sort (symbol), :match ('all|'any).
+Returns list of normalized items."
+  (when raindrop-debug-enable
+    (message "raindrop.el: fetch %S" plist))
+  (let* ((plan (raindrop--plan plist))
+         (endpoint (plist-get plan :endpoint))
+         (query (plist-get plan :query))
+         (alt-endpoint (plist-get plan :alt-endpoint))
+         payload items)
     (condition-case err
-        (progn
-          (setq payload (raindrop-api-request endpoint 'GET query nil)
-                items (alist-get 'items payload)
-                coll-id (cond
-                         ((numberp effective-coll) effective-coll)
-                         ((or (eq effective-coll 'all) (eq effective-coll :all) (null effective-coll)) raindrop-default-collection)
-                         (t raindrop-default-collection)))
-          ;; Fallback: empty items on one endpoint, try the alternate endpoint
-          (when (and (<= coll-id 0) search (or (null items) (equal items '())))
-            (setq alt-endpoint (if (string= endpoint "/raindrops") "/raindrops/0" "/raindrops")
-                  alt-payload (raindrop-api-request alt-endpoint 'GET query nil)
-                  alt-items (alist-get 'items alt-payload)
-                  items alt-items))
-          (mapcar #'raindrop--normalize-item (if (and items (listp items)) items '())))
+        (setq payload (raindrop-api-request endpoint 'GET query nil)
+              items (alist-get 'items payload))
       (user-error
-       (let* ((msg (error-message-string err))
-              (coll-id (cond
-                        ((numberp effective-coll) effective-coll)
-                        ((or (eq effective-coll 'all) (eq effective-coll :all) (null effective-coll)) raindrop-default-collection)
-                        (t raindrop-default-collection))))
-         (if (and (string-match-p "404" msg)
-                  (<= coll-id 0)
-                  search)
-             (let* ((alt-endpoint (if (string= endpoint "/raindrops") "/raindrops/0" "/raindrops"))
-                    (alt-payload (raindrop-api-request alt-endpoint 'GET query nil))
-                    (alt-items (alist-get 'items alt-payload)))
-               (mapcar #'raindrop--normalize-item (if (and alt-items (listp alt-items)) alt-items '())))
-           (signal (car err) (cdr err))))))))
+       (let ((msg (error-message-string err)))
+         (if (and alt-endpoint (string-match-p "HTTP 404" msg))
+             (setq payload (raindrop-api-request alt-endpoint 'GET query nil)
+                   items (alist-get 'items payload))
+           (signal (car err) (cdr err))))))
+    (when (and alt-endpoint (or (null items) (equal items '())))
+      (let* ((alt-payload (raindrop-api-request alt-endpoint 'GET query nil))
+             (alt-items (alist-get 'items alt-payload)))
+        (setq items alt-items)))
+    (raindrop--normalize-items items)))
 
 (defun raindrop-fetch-async (plist callback)
   "Asynchronously fetch raindrops according to PLIST and call CALLBACK with (items err)."
-  (let* ((tags (plist-get plist :tags))
-         (folders (or (plist-get plist :folders)
-                      (let ((f (plist-get plist :folder))) (and f (list f)))))
-         (collection (or (plist-get plist :collection) raindrop-default-collection))
-         (limit (or (plist-get plist :limit) raindrop-default-limit))
-         (match (or (plist-get plist :match) 'all))
-         (tags* (and tags (if (listp tags) tags (list tags))))
-         (folders* (and folders (if (listp folders) folders (list folders))))
-         (resolved-coll (and folders* (= (length folders*) 1)
-                             (let ((cid (raindrop--resolve-collection-id (car folders*))))
-                               (and (integerp cid) (> cid 0) cid))))
-         (effective-coll (or resolved-coll collection))
-         (search (and (or tags* (and folders* (not resolved-coll)))
-                      (raindrop--build-search tags* (and (not resolved-coll) folders*) match)))
-         (endpoint (raindrop--endpoint-for effective-coll (and search t)))
-         (query `((perpage . ,(min limit 100))
-                  ,@(when search `((search . ,search))))))
-    (let ((coll-id (cond
-                    ((numberp effective-coll) effective-coll)
-                    ((or (eq effective-coll 'all) (eq effective-coll :all) (null effective-coll)) raindrop-default-collection)
-                    (t raindrop-default-collection))))
-      (raindrop-api-request-async
-       endpoint 'GET query nil
-       (lambda (payload err)
-         (if err
-             (let ((msg (format "%s" err)))
-               (if (and (string-match-p "404" msg) (<= coll-id 0) search)
-                   (let ((alt-endpoint (if (string= endpoint "/raindrops") "/raindrops/0" "/raindrops")))
-                     (raindrop-api-request-async
-                      alt-endpoint 'GET query nil
-                      (lambda (payload2 err2)
-                        (if err2
-                            (funcall callback nil err2)
-                          (let ((items2 (alist-get 'items payload2)))
-                            (funcall callback (mapcar #'raindrop--normalize-item (if (and items2 (listp items2)) items2 '())) nil))))))
-                 (funcall callback nil err)))
-           (let ((items (alist-get 'items payload)))
-             (if (and (<= coll-id 0) search (or (null items) (equal items '())))
-                 (let ((alt-endpoint (if (string= endpoint "/raindrops") "/raindrops/0" "/raindrops")))
-                   (raindrop-api-request-async
-                    alt-endpoint 'GET query nil
-                    (lambda (payload3 err3)
-                      (if err3
-                          (funcall callback nil err3)
-                        (let ((items3 (alist-get 'items payload3)))
-                          (funcall callback (mapcar #'raindrop--normalize-item (if (and items3 (listp items3)) items3 '())) nil))))))
-               (funcall callback (mapcar #'raindrop--normalize-item (if (and items (listp items)) items '())) nil)))))))))
+  (let* ((plan (raindrop--plan plist))
+         (endpoint (plist-get plan :endpoint))
+         (query (plist-get plan :query))
+         (coll-id (plist-get plan :coll-id))
+         (alt-endpoint (plist-get plan :alt-endpoint)))
+    (raindrop-api-request-async
+     endpoint 'GET query nil
+     (lambda (payload err)
+       (if err
+           ;; If 404 and alt-endpoint exists (all+search), try alt.
+           (if (and alt-endpoint (string-match-p "HTTP 404" (format "%s" err)))
+               (raindrop-api-request-async
+                alt-endpoint 'GET query nil
+                (lambda (payload2 err2)
+                  (if err2
+                      (funcall callback nil err2)
+                    (funcall callback (raindrop--normalize-items (alist-get 'items payload2)) nil)))
+                )
+             (funcall callback nil err))
+         (let ((items (alist-get 'items payload)))
+           (if (and alt-endpoint (or (null items) (equal items '())))
+               (raindrop-api-request-async
+                alt-endpoint 'GET query nil
+                (lambda (payload3 err3)
+                  (if err3
+                      (funcall callback nil err3)
+                    (funcall callback (raindrop--normalize-items (alist-get 'items payload3)) nil))))
+             (funcall callback (raindrop--normalize-items items) nil))))))))
 
-;;; Filters API
+;;;; Filters API
 
 (defun raindrop--filters-endpoint (collection)
-  "Return the Filters endpoint for COLLECTION.
-Per Raindrop docs: GET /filters/{collectionId}, where collectionId = 0 means all collections.
-By our convention, values <= 0 are treated as “all collections” and mapped to 0 here."
+  "Return the Filters endpoint for COLLECTION."
   (let* ((id (cond
               ((numberp collection) collection)
               ((or (eq collection 'all) (eq collection :all) (null collection)) raindrop-default-collection)
@@ -538,13 +553,11 @@ tags (list of {_id count}), types (list of {_id count})."
 
 ;;;###autoload
 (defun raindrop-debug-filters (&optional collection search)
-  "Make a raw request to the Filters API for COLLECTION with SEARCH.
-COLLECTION defaults to “all” (`raindrop-default-collection`)."
-  (let* ((coll (or collection raindrop-default-collection))
-         (payload (raindrop-filters :collection coll :search search)))
-    payload))
+  "Make a raw request to the Filters API for COLLECTION with SEARCH."
+  (let* ((coll (or collection raindrop-default-collection)))
+    (raindrop-filters :collection coll :search search)))
 
-;;; Collections helpers (to discover valid IDs)
+;;;; Collections helpers
 
 (defun raindrop-collections ()
   "Get the user's collection list (alist payload).
@@ -556,7 +569,15 @@ Useful for discovering valid collection IDs for /raindrops/{id} requests."
   "Return the raw payload with the collection list."
   (raindrop-collections))
 
-;;; Minimal debug helpers
+;;;###autoload
+(defun raindrop-clear-cache ()
+  "Clear internal caches (e.g., collections list)."
+  (interactive)
+  (setq raindrop--collections-cache nil)
+  (when raindrop-debug-enable
+    (message "raindrop.el: collections cache cleared")))
+
+;;;; Minimal debug helpers
 
 ;;;###autoload
 (defun raindrop-debug-search (tags &optional collection)
@@ -565,9 +586,8 @@ TAGS is a string or list of tags. COLLECTION is a collection id (default 0 = all
   (let* ((tags-list (raindrop-parse-tags tags))
          (search (and tags-list (raindrop--build-tag-search tags-list 'all)))
          (coll (if (numberp collection) collection 0))
-         (endpoint (raindrop--endpoint-for coll (and search t)))
-         (payload (raindrop-api-request endpoint 'GET `((perpage . 5) ,@(when search `((search . ,search)))) nil)))
-    payload))
+         (endpoint (raindrop--endpoint-for coll (and search t))))
+    (raindrop-api-request endpoint 'GET `((perpage . 5) ,@(when search `((search . ,search)))) nil)))
 
 ;;;###autoload
 (defun raindrop-debug-fetch (tags &optional collection limit)
