@@ -26,6 +26,7 @@ This package provides:
 - A dynamic block =#+BEGIN: raindrop ... #+END:= that renders a list of links.
 - A helper command to use current heading tags to insert/update a links list.
 - An Org-babel language =raindrop= that returns Org-formatted lists.
+- An interactive search interface with as-you-type completion and animated spinner.
 
 This is an AI-assisted Emacs package, created in collaboration with a large
 language model (OpenAI). Requirements and vision were provided by the author.
@@ -38,38 +39,24 @@ language model (OpenAI). Requirements and vision were provided by the author.
 * Install
 This package requires Emacs 27.1+ and Org 9.4+.
 
-** quelpa
+** Elpaca
 #+BEGIN_SRC emacs-lisp
 (use-package raindrop
-  :quelpa (raindrop :fetcher github :repo "artawower/raindrop.el"))
-
-(use-package raindrop-org
-  :after org)
-
-(use-package ob-raindrop
-  :after org)
-#+END_SRC
-
-** straight.el
-#+BEGIN_SRC emacs-lisp
-(use-package raindrop
-  :straight (raindrop :type git :host github :repo "artawower/raindrop.el"))
+  :ensure (:host github :repo "artawower/raindrop.el"))
 
 (use-package raindrop-org :after org)
+(use-package raindrop-search)
 (use-package ob-raindrop :after org)
 #+END_SRC
 
-** Doom Emacs
-In =~/.doom.d/packages.el=:
+** package-vc (Emacs 29+)
 #+BEGIN_SRC emacs-lisp
-(package! raindrop :recipe (:host github :repo "artawower/raindrop.el"))
-#+END_SRC
+(package-vc-install '(raindrop :url "https://github.com/artawower/raindrop.el"))
 
-Then in =~/.doom.d/config.el=:
-#+BEGIN_SRC emacs-lisp
-(use-package! raindrop)
-(use-package! raindrop-org)
-(use-package! ob-raindrop)
+(use-package raindrop)
+(use-package raindrop-org :after org)
+(use-package raindrop-search)
+(use-package ob-raindrop :after org)
 #+END_SRC
 
 * Setup (Token)
@@ -88,8 +75,36 @@ Load packages (autoloads are simple; explicit require is fine):
 #+BEGIN_SRC emacs-lisp
 (require 'raindrop)
 (require 'raindrop-org)
+(require 'raindrop-search)
 (require 'ob-raindrop)
 #+END_SRC
+
+** Interactive Search Interface
+Use =M-x raindrop-search= for an interactive search with as-you-type completion:
+- Search by tags: =#emacs #lisp some text=
+- Search by folders: =[Work] project notes=
+- Combined search: =#important [Archive] meeting notes=
+- Animated ASCII spinner during loading
+- Smart collection/tag parsing
+- Support for all major completion frameworks (Vertico, Ivy, etc.)
+
+Features:
+- Press =RET= to open the selected bookmark in your browser
+- Use =M-x raindrop-search-toggle-enter-action= to toggle between opening the original link and the Raindrop app URL
+- Embark integration for additional actions (edit, delete, open in different ways)
+
+Embark Actions (when using Embark):
+- =o=: Open original link
+- =O=: Open in Raindrop app
+- =e=: Edit bookmark in dedicated buffer
+- =D=: Delete bookmark (with confirmation)
+
+Customization:
+- =raindrop-search-idle-delay=: delay before API request (default 0.25s)
+- =raindrop-search-page-size=: number of results per page (default 50)
+- =raindrop-search-spinner-frames=: spinner animation frames
+- =raindrop-search-spinner-delay=: spinner animation speed
+- =raindrop-search-title-max= / =raindrop-search-excerpt-max=: truncation limits
 
 ** Insert/Update links under a heading (tags AND)
 Add tags to a heading, e.g.:
@@ -165,9 +180,10 @@ You can also enable via babel languages API:
 - =raindrop-heading-tags-match=: default AND/OR for heading tags.
 
 * Notes
-- Backend uses =url.el= and =json-parse-buffer=.
+- Backend uses =request.el= for HTTP requests and =json-parse-buffer= for JSON parsing.
 - Content is inserted idempotently inside a dynamic block.
 - Title/excerpt are sanitized for single-line list items.
+- Interactive search supports vector-to-list conversion for Raindrop API responses.
 
 * 🍩 Contribute guide
 Any contribution is welcome!
@@ -205,3 +221,4 @@ emacs -Q --batch -L . \
 
 Notes:
 - Tests are self-contained and do not require a Raindrop token; they do not hit the network.
+- Tests automatically handle the =request.el= dependency via Eldev configuration.
