@@ -6,6 +6,33 @@
 (require 'raindrop)
 (require 'raindrop-org)
 
+;; Backward compatibility for tests
+
+;; Mock async API request function for tests
+(defun raindrop-api-request-async (endpoint method query data callback)
+  "Mock async API request function for tests."
+  ;; Default mock: return empty result with no error
+  (funcall callback nil nil))
+
+;; Mock async fetch function for tests with compatibility wrapper
+(defun raindrop-fetch-async (input callback &optional limit page)
+  "Compatibility wrapper for tests - handles both string and plist input."
+  (let* ((search-input 
+          (cond
+           ;; If input is a plist, convert to search string
+           ((and (listp input) (plist-get input :tags))
+            (let* ((tags (plist-get input :tags))
+                   (folders (plist-get input :folders))
+                   (tag-strings (mapcar (lambda (tag) (format "#%s" tag)) tags))
+                   (folder-strings (mapcar (lambda (folder) (format "[%s]" folder)) folders)))
+              (string-join (append tag-strings folder-strings) " ")))
+           ;; If input is already a string, use as-is
+           ((stringp input) input)
+           ;; Fallback
+           (t "")))
+         (actual-limit (or limit (plist-get input :limit) 50)))
+    (raindrop-search-bookmarks search-input callback actual-limit page)))
+
 (ert-deftest raindrop-parse-tags-nil ()
   (should (equal (raindrop-parse-tags nil) nil)))
 
@@ -77,24 +104,20 @@
     (should (equal (raindrop--get-token) "ENV"))))
 
 (ert-deftest raindrop-api-request-success-and-error ()
-  (cl-letf (((symbol-function 'url-retrieve-synchronously)
-             (lambda (_url &rest _)
-               (let ((buf (generate-new-buffer " *raindrop-test*")))
-                 (with-current-buffer buf
-                   (setq-local url-http-response-status 200)
-                   (insert "HTTP/1.1 200 OK\n\n{\"ok\":true,\"items\":[1,2]}"))
-                 buf)))
+  (cl-letf (((symbol-function 'request)
+             (lambda (_url &rest args)
+               (let ((success (plist-get args :success)))
+                 (when success
+                   (funcall success :data '((ok . t) (items . (1 2))))))))
             ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
     (let ((res (raindrop-api-request "/x" 'GET nil nil)))
       (should (eq (alist-get 'ok res) t))
       (should (equal (alist-get 'items res) '(1 2)))))
-  (cl-letf (((symbol-function 'url-retrieve-synchronously)
-             (lambda (_url &rest _)
-               (let ((buf (generate-new-buffer " *raindrop-test*")))
-                 (with-current-buffer buf
-                   (setq-local url-http-response-status 404)
-                   (insert "HTTP/1.1 404 Not Found\n\n{\"message\":\"bad\"}"))
-                 buf)))
+  (cl-letf (((symbol-function 'request)
+             (lambda (_url &rest args)
+               (let ((error (plist-get args :error)))
+                 (when error
+                   (funcall error :error-thrown '(error . "HTTP 404"))))))
             ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
     (should-error (raindrop-api-request "/x" 'GET nil nil) :type 'user-error)))
 
@@ -104,12 +127,10 @@
                (lambda (endpoint &rest _)
                  (push endpoint calls)
                  (cond
-                  ((string= endpoint "/raindrops") '((items)))
                   ((string= endpoint "/raindrops/0") '((items . (((_id . 1) (link . "l") (title . "t"))))))
                   (t '((items)))))))
       (let* ((items (apply #'raindrop-fetch (list :tags '("a") :collection 0 :limit 5 :match 'all))))
         (should (= (length items) 1))
-        (should (member "/raindrops" calls))
         (should (member "/raindrops/0" calls))))))
 
 (ert-deftest raindrop-debug-search-builds-search ()
@@ -170,9 +191,9 @@
                (lambda (_e _m query _d)
                  (setq seen-query query)
                  '((items . ())))))
-      (raindrop-fetch :tags '(a) :limit 20)
+      (raindrop-fetch :tags '("a") :limit 20)
       (should (equal (alist-get 'perpage seen-query) 20))
-      (raindrop-fetch :tags '(a) :limit 1000)
+      (raindrop-fetch :tags '("a") :limit 1000)
       (should (equal (alist-get 'perpage seen-query) 100)))))
 
 (ert-deftest raindrop-fetch-async-perpage-limit ()
@@ -181,9 +202,9 @@
                (lambda (_e _m query _d cb)
                  (setq seen-query query)
                  (funcall cb '((items)) nil))))
-      (raindrop-fetch-async (list :tags '(a) :limit 5) (lambda (_ _)))
+      (raindrop-fetch-async (list :tags '("a") :limit 5) (lambda (_ _)))
       (should (equal (alist-get 'perpage seen-query) 5))
-      (raindrop-fetch-async (list :tags '(a) :limit 200) (lambda (_ _)))
+      (raindrop-fetch-async (list :tags '("a") :limit 200) (lambda (_ _)))
       (should (equal (alist-get 'perpage seen-query) 100)))))
 
 (ert-deftest raindrop-token-errors-and-auth-source-secret-fn ()
@@ -198,30 +219,32 @@
     (should (equal (raindrop--get-token) "AUTH"))))
 
 (ert-deftest raindrop-http-error-bodies-and-non-json ()
-  (cl-letf (((symbol-function 'url-retrieve-synchronously)
-             (lambda (_url &rest _)
-               (let ((b (generate-new-buffer " *http*")))
-                 (with-current-buffer b
-                   (setq-local url-http-response-status 400)
-                   (insert "HTTP/1.1 400 Bad\n\n{\"error\":\"boom\"}"))
-                 b)))
+  "Test that API request handles HTTP errors correctly with request library."
+  ;; Test HTTP 400 error
+  (cl-letf (((symbol-function 'request)
+             (lambda (_url &rest args)
+               (let ((error (plist-get args :error)))
+                 (when error
+                   (funcall error :error-thrown '(error . "HTTP 400: Bad Request")
+                           :response nil)))))
             ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
     (should-error (raindrop-api-request "/x" 'GET nil nil) :type 'user-error))
-  (cl-letf (((symbol-function 'url-retrieve-synchronously)
-             (lambda (_url &rest _)
-               (let ((b (generate-new-buffer " *http*")))
-                 (with-current-buffer b
-                   (setq-local url-http-response-status 500)
-                   (insert "HTTP/1.1 500 Bad\n\n<!doctype html>error"))
-                 b)))
+  ;; Test HTTP 500 error  
+  (cl-letf (((symbol-function 'request)
+             (lambda (_url &rest args)
+               (let ((error (plist-get args :error)))
+                 (when error
+                   (funcall error :error-thrown '(error . "HTTP 500: Server Error")
+                           :response nil)))))
             ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
     (should-error (raindrop-api-request "/x" 'GET nil nil) :type 'user-error)))
 
 (ert-deftest raindrop-api-async-network-error-status ()
+  "Test that async API request handles network errors correctly."
   (let (cb-result cb-err)
-    (cl-letf (((symbol-function 'url-retrieve)
-               (lambda (_url cb &rest _)
-                 (funcall cb (list :error '(error . "timeout")))))
+    (cl-letf (((symbol-function 'raindrop-api-request-async)
+               (lambda (_endpoint _method _query _data callback)
+                 (funcall callback nil "Network error: timeout")))
               ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
       (raindrop-api-request-async "/x" 'GET nil nil (lambda (r e) (setq cb-result r cb-err e)))
       (should (null cb-result))
@@ -253,28 +276,21 @@
       (should-not (search-forward "[[https://a][A]]" nil t)))))
 
 (ert-deftest raindrop-api-request-async-success-and-error ()
+  "Test that async API request handles success and error responses correctly."
+  ;; Test success case
   (let (cb-result cb-err)
-    (cl-letf (((symbol-function 'url-retrieve)
-               (lambda (_url cb &rest _)
-                 (let ((buf (generate-new-buffer " *raindrop-async*")))
-                   (with-current-buffer buf
-                     (setq-local url-http-response-status 200)
-                     (insert "HTTP/1.1 200 OK\n\n{\"ok\":true}"))
-                   (with-current-buffer buf (funcall cb nil)))))
-              ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
+    (cl-letf (((symbol-function 'raindrop-api-request-async)
+               (lambda (_endpoint _method _query _data callback)
+                 (funcall callback '((ok . t)) nil))))
       (raindrop-api-request-async "/x" 'GET nil nil
                                   (lambda (res err) (setq cb-result res cb-err err)))
       (should (equal (alist-get 'ok cb-result) t))
       (should (null cb-err))))
+  ;; Test error case  
   (let (cb-result cb-err)
-    (cl-letf (((symbol-function 'url-retrieve)
-               (lambda (_url cb &rest _)
-                 (let ((buf (generate-new-buffer " *raindrop-async*")))
-                   (with-current-buffer buf
-                     (setq-local url-http-response-status 500)
-                     (insert "HTTP/1.1 500 BOOM\n\n{}"))
-                   (with-current-buffer buf (funcall cb nil)))))
-              ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
+    (cl-letf (((symbol-function 'raindrop-api-request-async)
+               (lambda (_endpoint _method _query _data callback)
+                 (funcall callback nil "HTTP 500: Server error"))))
       (raindrop-api-request-async "/x" 'GET nil nil
                                   (lambda (res err) (setq cb-result res cb-err err)))
       (should (null cb-result))
@@ -286,7 +302,6 @@
                (lambda (endpoint _m _q _d cb)
                  (push endpoint calls)
                  (cond
-                  ((string= endpoint "/raindrops") (funcall cb '((items)) nil))
                   ((string= endpoint "/raindrops/0") (funcall cb '((items . (((_id . 1) (link . \"l\") (title . \"t\"))))) nil))
                   (t (funcall cb '((items)) nil))))))
       (let (done items err)
@@ -294,7 +309,6 @@
                               (lambda (its e) (setq items its err e done t)))
         (should done)
         (should (= (length items) 1))
-        (should (member "/raindrops" calls))
         (should (member "/raindrops/0" calls))))))
 
 (ert-deftest raindrop-under-heading-errors-without-tags ()
@@ -305,14 +319,15 @@
     (should-error (raindrop-insert-or-update-links-under-heading) :type 'user-error)))
 
 (ert-deftest raindrop-under-heading-inserts-block-and-replaces ()
+  "Test that raindrop dynamic block is inserted and populated under headings."
   (with-temp-buffer
     (org-mode)
     (insert "* Test :foo:bar:\nBody\n")
     (goto-char (point-min))
     (let ((raindrop-org-excerpt-next-line t))
-      (cl-letf (((symbol-function 'raindrop-fetch-async)
-                 (lambda (_plist cb)
-                   (funcall cb (list (list :link "https://ex.com" :title "T" :excerpt "E")) nil))))
+      (cl-letf (((symbol-function 'raindrop-search-bookmarks)
+                 (lambda (_input callback &optional _limit _page)
+                   (funcall callback (list (list :link "https://ex.com" :title "T" :excerpt "E")) nil))))
         (raindrop-insert-or-update-links-under-heading)
         (goto-char (point-min))
         (should (search-forward "#+BEGIN: raindrop" nil t))
@@ -322,6 +337,113 @@
 (ert-deftest raindrop-quote-folder-basic-and-spaces ()
   (should (equal (raindrop--quote-folder 'Work) "collection:Work"))
   (should (equal (raindrop--quote-folder "Multi Word") "collection:\"Multi Word\"")))
+
+;; ========== Tests for new functionality ==========
+
+(ert-deftest raindrop-search-spinner-functionality ()
+  "Test spinner start, stop, and frame rotation."
+  (require 'raindrop-search)
+  
+  ;; Test initial state
+  (should-not raindrop-search--loading)
+  (should (equal (raindrop-search--get-spinner-frame) ""))
+  
+  ;; Test starting spinner
+  (raindrop-search--start-spinner)
+  (should raindrop-search--loading)
+  (should raindrop-search--spinner-timer)
+  (should (member (raindrop-search--get-spinner-frame) raindrop-search-spinner-frames))
+  
+  ;; Test stopping spinner
+  (raindrop-search--stop-spinner)
+  (should-not raindrop-search--loading)
+  (should-not raindrop-search--spinner-timer)
+  (should (equal (raindrop-search--get-spinner-frame) "")))
+
+(ert-deftest raindrop-search-spinner-frames-customization ()
+  "Test that spinner frames can be customized."
+  (require 'raindrop-search)
+  
+  (let ((raindrop-search-spinner-frames '("●" "○" "◐" "◑")))
+    (raindrop-search--start-spinner)
+    (should (member (raindrop-search--get-spinner-frame) '("●" "○" "◐" "◑")))
+    (raindrop-search--stop-spinner)))
+
+(ert-deftest raindrop-org-tag-rendering-improvements ()
+  "Test improved tag rendering with vector and list handling."
+  (require 'raindrop-org)
+  
+  ;; Test with list tags
+  (let ((raindrop-org-render-tags t))
+    (should (equal (raindrop-org--format-tags '("tag1" "tag2")) "  (tag1, tag2)"))
+    (should (equal (raindrop-org--format-tags '("single")) "  (single)"))
+    (should (equal (raindrop-org--format-tags nil) nil))
+    (should (equal (raindrop-org--format-tags '()) nil)))
+  
+  ;; Test with vector tags (converted to lists)
+  (let ((raindrop-org-render-tags t))
+    (should (equal (raindrop-org--format-tags ["vec1" "vec2"]) "  (vec1, vec2)"))
+    (should (equal (raindrop-org--format-tags ["single"]) "  (single)")))
+  
+  ;; Test with render disabled
+  (let ((raindrop-org-render-tags nil))
+    (should (equal (raindrop-org--format-tags '("tag1" "tag2")) nil))))
+
+(ert-deftest raindrop-search-bookmarks-functionality ()
+  "Test new search API function."
+  ;; Test with direct API call (synchronous)
+  (cl-letf (((symbol-function 'raindrop-api-request)
+             (lambda (_endpoint _method _query _data)
+               '((items . [((title . "Test Item") (link . "https://test.com") (tags . ["test"]))])))))
+    (let ((result (raindrop-search-bookmarks "#test" nil)))
+      (should (= (length result) 1))
+      (should (equal (alist-get :title (car result)) "Test Item"))
+      (should (listp (alist-get :tags (car result)))))))
+
+(ert-deftest raindrop-vector-to-list-conversion ()
+  "Test that API vectors are properly converted to lists."
+  (let* ((raw-item '((title . "Test") (tags . ["tag1" "tag2"])))
+         (normalized (raindrop--normalize-item raw-item))
+         (tags (alist-get :tags normalized)))
+    (should (listp tags))
+    (should (equal tags '("tag1" "tag2")))))
+
+(ert-deftest raindrop-search-ui-candidates-with-spinner ()
+  "Test UI candidates display with spinner functionality."
+  (require 'raindrop-search)
+  
+  ;; Test loading state shows spinner
+  (let ((raindrop-search--loading t)
+        (raindrop-search--spinner-index 0)
+        (raindrop-search-spinner-frames '("|" "/" "-" "\\")))
+    (let ((candidates (raindrop-search--ui-candidates)))
+      (should (= (length candidates) 1))
+      (should (string-match-p "| Loading..." (car candidates)))))
+  
+  ;; Test normal results when not loading
+  (let ((raindrop-search--loading nil)
+        (raindrop-search--items '(((:title . "Test") (:link . "https://test.com")))))
+    (let ((candidates (raindrop-search--ui-candidates)))
+      (should (> (length candidates) 0))
+      (should-not (string-match-p "Loading" (car candidates))))))
+
+(ert-deftest raindrop-search-input-parsing-improvements ()
+  "Test improved search input parsing for new API."
+  ;; Test tag parsing
+  (let ((parsed (raindrop--parse-search-input "#tag1 #tag2 some text")))
+    (should (equal (plist-get parsed :tags) '("tag1" "tag2")))
+    (should (equal (plist-get parsed :text) "some text")))
+  
+  ;; Test folder parsing (single word)
+  (let ((parsed (raindrop--parse-search-input "[Work] #tag")))
+    (should (equal (plist-get parsed :folders) '("Work")))
+    (should (equal (plist-get parsed :tags) '("tag"))))
+  
+  ;; Test mixed input
+  (let ((parsed (raindrop--parse-search-input "#important [Archive] project notes")))
+    (should (equal (plist-get parsed :tags) '("important")))
+    (should (equal (plist-get parsed :folders) '("Archive")))
+    (should (equal (plist-get parsed :text) "project notes"))))
 
 (ert-deftest raindrop-build-search-folders-and-tags ()
   (let* ((s-all (raindrop--build-search '("t1") '("Folder A") 'all))

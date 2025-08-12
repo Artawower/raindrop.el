@@ -1,101 +1,178 @@
 ;;; raindrop-search.el --- As-you-type Raindrop search completion  -*- lexical-binding: t; -*-
 
-;; Author: you
-;; Version: 0.9
-;; Package-Requires: ((emacs "27.1") (raindrop "0.1") (request "0.3.0") (json "1.4"))
+;; Author: artawower <artawower33@gmail.com>
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience, matching
 ;; URL: https://github.com/your/repo
+
+;;; Commentary:
+;; Interactive search interface for Raindrop bookmarks with:
+;; - As-you-type completion with animated spinner
+;; - Smart collection/tag parsing (#tag, [folder])
+;; - Embark integration for editing/deleting items
+;; - Customizable spinner animation and appearance
 
 ;;; Code:
 
 (require 'subr-x)
 (require 'seq)
 (require 'cl-lib)
-(require 'json)
-(require 'request)
-(require 'raindrop)
 
-;; ---------- Faces ----------
-(defface raindrop-search-tag
-  '((t :inherit font-lock-keyword-face :foreground "DodgerBlue3"))
-  "Face for tags in completion results.")
+(declare-function raindrop--kv "raindrop" (item key))
+(declare-function raindrop--collection-id-by-title "raindrop" (title))
+(declare-function raindrop--collection-title-by-id "raindrop" (id))
+(declare-function raindrop--ensure-collections-async "raindrop" (callback))
+(declare-function raindrop--parse-search-input "raindrop" (input))
+(declare-function raindrop--meaningful-search-input-p "raindrop" (parsed))
+(declare-function raindrop-search-bookmarks "raindrop" (input callback &optional page-size page))
+(declare-function raindrop-api-request-async "raindrop" (endpoint method params payload callback))
 
-(defface raindrop-search-collection
-  '((t :inherit font-lock-function-name-face :foreground "orange"))
-  "Face for collections in completion results.")
-
-(defface raindrop-search-edit-key
-  '((t :inherit font-lock-keyword-face))
-  "Face used for read-only field labels in the edit buffer.")
-
-(defface raindrop-search-edit-header
-  '((t :inherit shadow :weight normal))
-  "Face used for the header line in the edit buffer.")
-
-;; ---------- Customization ----------
 (defgroup raindrop-search nil
   "Completion UI for Raindrop."
   :group 'convenience)
 
+(defface raindrop-search-tag
+  '((t :inherit font-lock-keyword-face :foreground "DodgerBlue3"))
+  "Face for tags in completion results."
+  :group 'raindrop-search)
+
+(defface raindrop-search-collection
+  '((t :inherit font-lock-function-name-face :foreground "orange"))
+  "Face for collections in completion results."
+  :group 'raindrop-search)
+
+(defface raindrop-search-edit-key
+  '((t :inherit font-lock-keyword-face))
+  "Face used for read-only field labels in the edit buffer."
+  :group 'raindrop-search)
+
+(defface raindrop-search-edit-header
+  '((t :inherit shadow :weight normal))
+  "Face used for the header line in the edit buffer."
+  :group 'raindrop-search)
+
 (defcustom raindrop-search-title-max 20
-  "Maximum number of characters shown for titles in completion candidates
-before truncation."
-  :type 'integer)
+  "Maximum characters for titles before truncation."
+  :type 'integer
+  :group 'raindrop-search)
+
 (defcustom raindrop-search-excerpt-max 40
-  "Maximum number of characters shown for the excerpt/description part
-of a completion candidate."
-  :type 'integer)
+  "Maximum characters for excerpts before truncation."
+  :type 'integer
+  :group 'raindrop-search)
+
 (defcustom raindrop-search-idle-delay 0.25
-  "Idle time in seconds before firing a Raindrop API request after the
-minibuffer input changes."
-  :type 'number)
+  "Idle time before firing a Raindrop API request."
+  :type 'number
+  :group 'raindrop-search)
+
 (defcustom raindrop-search-page-size 50
   "Number of items to request per page from the Raindrop API (1..50)."
-  :type 'integer)
+  :type 'integer
+  :group 'raindrop-search)
+
 (defcustom raindrop-search-text-collection 0
   "Default collection ID to search when no [collection] token is used.
 0 means the root (\"All\"), while -1 refers to \"Unsorted\"."
-  :type 'integer :group 'raindrop)
+  :type 'integer
+  :group 'raindrop-search)
+
 (defcustom raindrop-search-enter-action 'link
   "Enter opens either original link or Raindrop app."
-  :type '(choice (const link) (const raindrop)))
+  :type '(choice (const link) (const raindrop))
+  :group 'raindrop-search)
+
 (defcustom raindrop-search-raindrop-url-builder
   #'raindrop-search--default-raindrop-url-builder
   "Function used to build a Raindrop app URL for ITEM.
 Called with a normalized Raindrop item plist/alist and must return a
 URL string."
-  :type 'function)
+  :type 'function
+  :group 'raindrop-search)
 
-;; ---------- State ----------
-(defvar raindrop-search--timer nil)
-(defvar raindrop-search--last-gen 0)
-(defvar raindrop-search--items nil)
-(defvar raindrop-search--collections-loading nil)
-(defvar raindrop-search--collections-ready nil)
-(defvar raindrop-search--collections-by-title nil)
-(defvar raindrop-search--collections-by-id nil)
-(defvar raindrop-search--last-input nil)
-(defvar raindrop-search--cand-map (make-hash-table :test 'equal))
+(defcustom raindrop-search-spinner-frames '("|" "/" "-" "\\")
+  "Frames for the loading spinner animation."
+  :type '(repeat string)
+  :group 'raindrop-search)
 
-;; ---------- Utils ----------
+(defcustom raindrop-search-spinner-delay 0.1
+  "Delay in seconds between spinner frame updates."
+  :type 'number
+  :group 'raindrop-search)
+
+(defvar raindrop-search--timer nil
+  "Timer for delayed API requests.")
+
+(defvar raindrop-search--last-gen 0
+  "Generation counter for tracking request versions.")
+
+(defvar raindrop-search--items nil
+  "Current list of search result items.")
+
+(defvar raindrop-search--last-input nil
+  "Last input string to detect changes.")
+
+(defvar raindrop-search--cand-map (make-hash-table :test 'equal)
+  "Hash table mapping candidate strings to items.")
+
+(defvar raindrop-search--loading nil
+  "Whether a search is currently loading.")
+
+(defvar raindrop-search--spinner-timer nil
+  "Timer for spinner animation.")
+
+(defvar raindrop-search--spinner-index 0
+  "Current frame index in spinner animation.")
+
+(defvar-local raindrop-search--edit-item-id nil
+  "ID of the item being edited in the current buffer.")
+
 (defun raindrop-search--log (fmt &rest args)
+  "Log a formatted message with FMT and ARGS."
   (message "[raindrop-search] %s" (apply #'format fmt args)))
 
+(defun raindrop-search--start-spinner ()
+  "Start the loading spinner animation."
+  (setq raindrop-search--loading t
+        raindrop-search--spinner-index 0)
+  (when raindrop-search--spinner-timer
+    (cancel-timer raindrop-search--spinner-timer))
+  (setq raindrop-search--spinner-timer
+        (run-with-timer 0 raindrop-search-spinner-delay #'raindrop-search--update-spinner)))
+
+(defun raindrop-search--stop-spinner ()
+  "Stop the loading spinner animation."
+  (setq raindrop-search--loading nil)
+  (when raindrop-search--spinner-timer
+    (cancel-timer raindrop-search--spinner-timer)
+    (setq raindrop-search--spinner-timer nil))
+  (raindrop-search--safe-exhibit))
+
+(defun raindrop-search--update-spinner ()
+  "Update spinner frame and refresh display."
+  (when raindrop-search--loading
+    (setq raindrop-search--spinner-index
+          (mod (1+ raindrop-search--spinner-index)
+               (length raindrop-search-spinner-frames)))
+    (raindrop-search--safe-exhibit)))
+
+(defun raindrop-search--get-spinner-frame ()
+  "Get current spinner frame."
+  (if raindrop-search--loading
+      (nth raindrop-search--spinner-index raindrop-search-spinner-frames)
+    ""))
+
 (defun raindrop-search--truncate (s n)
+  "Truncate string S to N characters with ellipsis."
   (if (and (stringp s) (> (length s) n))
       (concat (substring s 0 n) "…")
     (or s "")))
 
-(defun raindrop-search--kv (it key)
-  (let* ((k1 key)
-         (k2 (if (keywordp key) (intern (substring (symbol-name key) 1))
-               (intern (format ":%s" key)))))
-    (or (plist-get it k1)
-        (plist-get it k2)
-        (and (consp it) (alist-get k1 it))
-        (and (consp it) (alist-get k2 it)))))
+(defalias 'raindrop-search--kv 'raindrop--kv)
 
 (defun raindrop-search--safe-exhibit ()
+  "Force completion UI update across different frameworks."
   (let ((win (active-minibuffer-window))
         (gen raindrop-search--last-gen))
     (when (and win (minibufferp (window-buffer win)))
@@ -106,131 +183,58 @@ URL string."
             (with-current-buffer (window-buffer win)
               (when (boundp 'vertico--input)
                 (setq vertico--input nil))
+              (when (boundp 'vertico--history-hash)
+                (setq vertico--history-hash nil))
+              (when (boundp 'vertico--lock-candidate)
+                (setq vertico--lock-candidate nil))
               (when (fboundp 'vertico--update)
                 (vertico--update))
+              (let ((content (minibuffer-contents-no-properties)))
+                (delete-minibuffer-contents)
+                (insert content))
               (when (fboundp 'vertico--exhibit)
-                (vertico--exhibit))))
+                (vertico--exhibit))
+              (redisplay t)))
            ((and (boundp 'ivy-mode) ivy-mode (fboundp 'ivy--exhibit))
             (ivy--exhibit))
-           ((and (boundp 'icomplete-mode) icomplete-mode (fboundp 'icomplete-exhibit))
-            (icomplete-exhibit))
-           ((fboundp 'mct--exhibit) 
+           ((and (boundp 'icomplete-mode) icomplete-mode)
+            (when (fboundp 'icomplete-exhibit)
+              (icomplete-exhibit))
+            (redisplay t))
+           ((fboundp 'mct--exhibit)
             (mct--exhibit))
            ((and (boundp 'selectrum-mode) selectrum-mode (fboundp 'selectrum--update))
-            (selectrum--update))))))))
+            (selectrum--update))
+           (t (redisplay t))))))))
 
-;; ---------- Collections cache (fix: correct hash test; always refresh UI after load) ----------
-(defun raindrop-search--collections-build-index (items)
-  (let ((by-title (make-hash-table :test 'equal))  ;; titles are lowercase strings
-        (by-id    (make-hash-table :test 'eql)))
-    (dolist (c items)
-      (let* ((id (or (raindrop-search--kv c '_id)
-                     (raindrop-search--kv c :_id)
-                     (raindrop-search--kv c 'id)
-                     (raindrop-search--kv c :id)))
-             (title (or (raindrop-search--kv c 'title)
-                        (raindrop-search--kv c :title)
-                        (raindrop-search--kv c 'name)
-                        (raindrop-search--kv c :name))))
-        (when (and id title)
-          (puthash (downcase title) id by-title)
-          (puthash id title by-id))))
-    (setq raindrop-search--collections-by-title by-title
-          raindrop-search--collections-by-id by-id)))
+(defalias 'raindrop-search--collection-id-by-title 'raindrop--collection-id-by-title)
+(defalias 'raindrop-search--collection-title-by-id 'raindrop--collection-title-by-id)
 
 (defun raindrop-search--ensure-collections ()
-  (unless (or raindrop-search--collections-ready
-              raindrop-search--collections-loading)
-    (setq raindrop-search--collections-loading t)
-    (raindrop-search--log "loading collections…")
-    (raindrop-api-request-async
-     "/collections" 'GET nil nil
-     (lambda (res err)
-       (setq raindrop-search--collections-loading nil)
-       (if err
-           (raindrop-search--log "collections load error: %s" err)
-         (let ((items (alist-get 'items res)))
-           ;; Конвертируем вектор в список, если необходимо
-           (when (vectorp items)
-             (setq items (append items nil)))
-           (raindrop-search--collections-build-index (or items '()))))
-       (setq raindrop-search--collections-ready t)
-       ;; important: repaint candidates once titles are available
-       (raindrop-search--safe-exhibit)))))
+  "Ensure collections are loaded, refreshing UI when ready."
+  (raindrop--ensure-collections-async
+   (lambda () (raindrop-search--safe-exhibit))))
 
-(defun raindrop-search--collection-id-by-title (name)
-  (when (and name raindrop-search--collections-by-title)
-    (gethash (downcase name) raindrop-search--collections-by-title)))
-
-(defun raindrop-search--collection-title-by-id (cid)
-  (cond
-   ((eq cid -1) "Unsorted")
-   ((hash-table-p raindrop-search--collections-by-id)
-    (gethash cid raindrop-search--collections-by-id))
-   (t nil)))
-
-;; ---------- Parsing / search building ----------
-(defun raindrop-search--parse (s)
-  (let* ((s (or s ""))
-         (tokens (split-string s "[ \t]+" t))
-         (tags '())
-         (folders '())
-         (texts '())
-         (tag-re (rx string-start "#" (group (+ (any alnum ?- ?_ ?+ ?.))) string-end))
-         (folder-re (rx string-start "[" (group (*? (not (any "]")))) "]" string-end)))
-    (dolist (tok tokens)
-      (cond
-       ((string-match tag-re tok) (push (downcase (match-string 1 tok)) tags))
-       ((string-match folder-re tok) (push (match-string 1 tok) folders))
-       (t (push tok texts))))
-    (list :tags (nreverse tags)
-          :folders (nreverse folders)
-          :text (string-join (nreverse texts) " "))))
-
-(defun raindrop-search--meaningful-input-p (parsed)
-  (let ((text (plist-get parsed :text))
-        (tags (plist-get parsed :tags))
-        (folders (plist-get parsed :folders)))
-    (or (and text (>= (length text) 2))
-        (and (listp tags) (> (length tags) 0))
-        (and (listp folders) (> (length folders) 0)))))
-
-(defun raindrop-search--compose-search (text tags)
-  (string-join
-   (delq nil
-         (list (and (listp tags) tags (raindrop--build-tag-search tags 'all))
-               (and text (not (string-empty-p text)) text)))
-   " "))
-
-(defun raindrop-search--endpoint-and-query (collection-id search page)
-  (let* ((cid (if (numberp collection-id) collection-id raindrop-search-text-collection))
-         (pp  (max 1 (min raindrop-search-page-size 50)))
-         (pg  (max 0 (or page 0)))
-         (endpoint (format "/raindrops/%d" cid))
-         (q (seq-filter #'consp
-                        (append
-                         (when (and search (not (string-empty-p search)))
-                           (list (cons 'search search)))
-                         (list (cons 'perpage pp)
-                               (cons 'page pg)
-                               (cons 'expand "collection"))))))
-    (cons endpoint q)))
+(defalias 'raindrop-search--parse 'raindrop--parse-search-input)
+(defalias 'raindrop-search--meaningful-input-p 'raindrop--meaningful-search-input-p)
 
 (defun raindrop-search--domain-of (link item)
+  "Extract domain from LINK or ITEM."
   (or (raindrop-search--kv item 'domain)
       (and (stringp link)
-           (when (string-match "//\\([^/]+\\)" link)
+           (when (string-match "//\KATEX_INLINE_OPEN[^/]+\KATEX_INLINE_CLOSE" link)
              (match-string 1 link)))))
 
 (defun raindrop-search--tags->strings (tags)
+  "Convert TAGS to list of lowercase strings."
   (cond
    ((null tags) nil)
    ((vectorp tags) (mapcar (lambda (x) (downcase (format "%s" x))) (append tags nil)))
    ((listp tags)   (mapcar (lambda (x) (downcase (format "%s" x))) tags))
    (t nil)))
 
-;; ---------- Formatting (ensure collection title) ----------
 (defun raindrop-search--format-candidate (it)
+  "Format IT as a completion candidate string."
   (let* ((title   (or (raindrop-search--kv it :title)
                       (raindrop-search--kv it 'title) ""))
          (excerpt (or (raindrop-search--kv it :excerpt)
@@ -239,7 +243,7 @@ URL string."
                                              raindrop-search-excerpt-max))
          (link    (or (raindrop-search--kv it :link)
                       (raindrop-search--kv it 'link) ""))
-         (domain* (when-let ((d (raindrop-search--domain-of link it)))
+         (domain* (and-let* ((d (raindrop-search--domain-of link it)))
                     (propertize d 'face 'shadow)))
          (tags    (raindrop-search--tags->strings
                    (or (raindrop-search--kv it :tags)
@@ -275,95 +279,94 @@ URL string."
     (string-join (delq nil (list collstr desc* tagstr domain*)) "  ")))
 
 (defun raindrop-search--apply-results (gen items)
+  "Apply ITEMS results if GEN matches current generation."
   (when (= gen raindrop-search--last-gen)
+    (raindrop-search--stop-spinner)
     (setq raindrop-search--items items)
     (raindrop-search--safe-exhibit)))
 
-;; ---------- Networking ----------
-(defun raindrop-api-request-async (endpoint method params body callback)
-  (let* ((url (concat raindrop-api-base endpoint))
-         (token (raindrop--get-token-from-auth-source))
-         (headers `(("Authorization" . ,(concat "Bearer " token))
-                    ("Content-Type" . "application/json")))
-         (data (when body (json-encode body)))
-         (type (pcase method ('GET "GET") ('PUT "PUT") ('POST "POST") ('DELETE "DELETE") (_ "GET"))))
-    (request url
-      :type type :headers headers :params params :data data
-      :parser 'json-read :encoding 'utf-8
-      :success (cl-function (lambda (&key data &allow-other-keys)
-                              (funcall callback data nil)))
-      :error   (cl-function (lambda (&key error-thrown &allow-other-keys)
-                              (funcall callback nil (format "%s" error-thrown)))))))
-
 (defun raindrop-search--fetch (gen page parsed)
-  (let* ((tags    (plist-get parsed :tags))
+  "Fetch results for GEN at PAGE using PARSED input."
+  (let* ((tags (plist-get parsed :tags))
          (folders (plist-get parsed :folders))
-         (text    (plist-get parsed :text))
-         (folder-name (car (last folders)))
-         (coll-id (or (and folder-name
-                           (raindrop-search--collection-id-by-title folder-name))
-                      raindrop-search-text-collection))
-         (search (raindrop-search--compose-search text tags))
-         (pair   (raindrop-search--endpoint-and-query coll-id search page))
-         (endpoint (car pair))
-         (query    (cdr pair)))
-    (raindrop-search--log "fetch(gen=%s) search=%S endpoint=%s" gen (if (string-empty-p search) nil search) endpoint)
-    (raindrop-api-request-async
-     endpoint 'GET query nil
-     (lambda (res err)
-       (when (and err (string-match-p "HTTP 404\\|Network error" err))
-         (setq res '((items))))
+         (text (plist-get parsed :text))
+         (input (string-join
+                 (append
+                  (mapcar (lambda (tag) (concat "#" tag)) tags)
+                  (mapcar (lambda (folder) (concat "[" folder "]")) folders)
+                  (and text (not (string-empty-p text)) (list text)))
+                 " ")))
+    (raindrop-search--log "fetch(gen=%s) input=%S" gen input)
+    (raindrop-search-bookmarks
+     input
+     (lambda (items err)
        (when (= gen raindrop-search--last-gen)
          (if err
              (progn (message "Raindrop error: %s" err)
                     (raindrop-search--apply-results gen nil))
-           (let* ((raw  (or (alist-get 'items res) '()))
-                  (norm (mapcar (lambda (x) (condition-case nil
-                                                (raindrop--normalize-item x)
-                                              (error x)))
-                                raw)))
-             (raindrop-search--apply-results gen norm))))))))
+           (raindrop-search--apply-results gen items))))
+     raindrop-search-page-size page)))
 
-;; ---------- UI flow ----------
 (defun raindrop-search--idle-fire ()
+  "Fire API request after idle delay."
   (let* ((input (minibuffer-contents-no-properties))
          (parsed (raindrop-search--parse input)))
-    (raindrop-search--log "idle fire input=%S" input)
-    (when (raindrop-search--meaningful-input-p parsed)
+    (when (and (equal input raindrop-search--last-input)
+               (raindrop-search--meaningful-input-p parsed))
+      (raindrop-search--log "idle fire input=%S" input)
+      (raindrop-search--start-spinner)
       (setq raindrop-search--last-gen (1+ raindrop-search--last-gen))
       (raindrop-search--fetch raindrop-search--last-gen 0 parsed))))
 
 (defun raindrop-search--schedule ()
+  "Schedule API request only if input actually changed."
   (let ((input (minibuffer-contents-no-properties)))
-    (unless (equal input raindrop-search--last-input)
+    (cond
+     ((equal input raindrop-search--last-input)
+      nil)
+     (t
       (setq raindrop-search--last-input input)
       (setq raindrop-search--items nil)
       (raindrop-search--safe-exhibit)
-      (setq raindrop-search--last-gen (1+ raindrop-search--last-gen))))
-  (when raindrop-search--timer (cancel-timer raindrop-search--timer))
-  (setq raindrop-search--timer
-        (run-with-idle-timer raindrop-search-idle-delay nil
-                             #'raindrop-search--idle-fire)))
+      (setq raindrop-search--last-gen (1+ raindrop-search--last-gen))
+      (when raindrop-search--timer
+        (cancel-timer raindrop-search--timer)
+        (setq raindrop-search--timer nil))
+      (let ((parsed (raindrop-search--parse input)))
+        (when (raindrop-search--meaningful-input-p parsed)
+          (setq raindrop-search--timer
+                (run-with-idle-timer raindrop-search-idle-delay nil
+                                     #'raindrop-search--idle-fire))))))))
 
 (defun raindrop-search--ui-candidates ()
+  "Generate completion candidates for current state."
   (setq raindrop-search--cand-map (make-hash-table :test 'equal))
-  (let ((i -1))
-    (mapcar
-     (lambda (it)
-       (setq i (1+ i))
-       (let ((s (raindrop-search--format-candidate it)))
-         (puthash s it raindrop-search--cand-map)
-         (propertize s 'raindrop-id (raindrop-search--item-id it)
-                     'raindrop-index i)))
-     (or raindrop-search--items '()))))
+  (cond
+   (raindrop-search--loading
+    (let ((spinner (raindrop-search--get-spinner-frame)))
+      (list (propertize (format "%s Loading..." spinner)
+                        'face 'shadow))))
+   (raindrop-search--items
+    (let ((i -1))
+      (mapcar
+       (lambda (it)
+         (setq i (1+ i))
+         (let ((s (raindrop-search--format-candidate it)))
+           (puthash s it raindrop-search--cand-map)
+           (propertize s 'raindrop-id (raindrop-search--item-id it)
+                       'raindrop-index i)))
+       raindrop-search--items)))
+   (t '())))
 
 (defun raindrop-search--item-id (it)
+  "Extract ID from IT."
   (or (raindrop-search--kv it 'id)
       (raindrop-search--kv it :id)
       (raindrop-search--kv it '_id)
       (raindrop-search--kv it :_id)))
 
 (defun raindrop-search--default-raindrop-url-builder (item)
+  "Build default Raindrop app URL for ITEM."
   (let* ((cid (or (raindrop-search--kv item :collectionId)
                   (raindrop-search--kv item 'collectionId)))
          (id  (raindrop-search--item-id item)))
@@ -376,14 +379,16 @@ URL string."
      (t "https://app.raindrop.io/"))))
 
 (defun raindrop-search--open-item (item)
+  "Open ITEM based on configured action."
   (pcase raindrop-search-enter-action
-    ('raindrop (when-let ((url (funcall raindrop-search-raindrop-url-builder item)))
+    ('raindrop (and-let* ((url (funcall raindrop-search-raindrop-url-builder item)))
                  (browse-url url)))
-    (_ (when-let ((url (or (raindrop-search--kv item :link)
+    (_ (and-let* ((url (or (raindrop-search--kv item :link)
                            (raindrop-search--kv item 'link))))
          (browse-url url)))))
 
 (defun raindrop-search--exit (cand)
+  "Exit with selected CAND."
   (let* ((idx (cl-position cand (raindrop-search--ui-candidates) :test #'string=))
          (it (or (and idx (nth idx raindrop-search--items))
                  (and (stringp cand) (gethash cand raindrop-search--cand-map)))))
@@ -400,17 +405,20 @@ app URL for the item."
   (message "raindrop-search: Enter action → %s" raindrop-search-enter-action))
 
 (defun raindrop-search--minibuffer-setup ()
+  "Setup minibuffer for raindrop search."
   (when (minibufferp)
     (add-hook 'post-command-hook #'raindrop-search--schedule nil t)
     (raindrop-search--schedule)
     (raindrop-search--ensure-collections)))
 
 (defun raindrop-search--minibuffer-cleanup ()
+  "Cleanup minibuffer after raindrop search."
   (when (minibufferp)
     (remove-hook 'post-command-hook #'raindrop-search--schedule t))
   (when raindrop-search--timer
     (cancel-timer raindrop-search--timer)
-    (setq raindrop-search--timer nil)))
+    (setq raindrop-search--timer nil))
+  (raindrop-search--stop-spinner))
 
 ;;;###autoload
 (defun raindrop-search ()
@@ -424,31 +432,31 @@ app URL for the item."
                        (pcase action
                          ('metadata '(metadata (category . raindrop)))
                          (_ (raindrop-search--ui-candidates))))))
-          (when-let ((res (completing-read "Raindrop: " table nil t)))
+          (and-let* ((res (completing-read "Raindrop: " table nil t)))
             (unless (string-empty-p res)
               (raindrop-search--exit res))))
       (raindrop-search--minibuffer-cleanup))))
 
-;; ---------- Embark integration: Edit buffer with colored, read-only keys ----------
 (defvar raindrop-search-edit-mode-map
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "C-c C-c") #'raindrop-search-edit-save)
     (define-key m (kbd "C-c C-k") #'raindrop-search-edit-cancel)
-    m))
+    m)
+  "Keymap for Raindrop edit mode.")
 
 (define-derived-mode raindrop-search-edit-mode text-mode "Raindrop-Edit"
   "Major mode for editing a Raindrop item."
   (setq buffer-read-only nil)
   (setq-local comment-start "# ")
   (setq-local comment-start-skip "#+\\s-*")
-  ;; don't fight our explicit faces
   (setq-local font-lock-defaults nil))
 
 (defun raindrop-search--edit-buffer-name (id)
+  "Generate buffer name for editing item with ID."
   (format "*Raindrop Edit %s*" id))
 
 (defun raindrop-search--insert-ro-key (label)
-  "Insert LABEL (like \"Title:\") as read-only with face."
+  "Insert LABEL as read-only with face."
   (let ((start (point)))
     (insert label)
     (add-text-properties
@@ -460,6 +468,7 @@ app URL for the item."
                  font-lock-face raindrop-search-edit-key))))
 
 (defun raindrop-search--open-edit-buffer (item)
+  "Open edit buffer for ITEM."
   (let* ((id (raindrop-search--item-id item))
          (buf (get-buffer-create (raindrop-search--edit-buffer-name (or id "unknown"))))
          (title (substring-no-properties (or (raindrop-search--kv item :title)
@@ -474,7 +483,6 @@ app URL for the item."
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
-        ;; header
         (insert (propertize "# Edit Raindrop item. Press C-c C-c to save, C-c C-k to cancel."
                             'face 'raindrop-search-edit-header))
         (insert "\n\n")
@@ -495,33 +503,32 @@ app URL for the item."
         (insert excerpt))
       (goto-char (point-min))
       (raindrop-search-edit-mode)
-      (setq-local raindrop-search--edit-item-id id))
-    ;; Display and focus the edit buffer *now*; if invoked from a minibuffer
-    ;; (e.g., via Embark), also quit the minibuffer after switching focus.
+      (setq raindrop-search--edit-item-id id))
     (pop-to-buffer buf)
-    (when-let ((win (get-buffer-window buf)))
+    (and-let* ((win (get-buffer-window buf)))
       (select-window win))
     (goto-char (point-min))
     (re-search-forward "^Title:\\s-*" nil t)
-    ;; If we're currently inside a live minibuffer, close it asynchronously
-    ;; so point/focus truly land in the edit buffer.
     (when (and (active-minibuffer-window)
                (minibufferp (window-buffer (active-minibuffer-window))))
-      (run-at-time 0 nil (lambda () (when (minibufferp)
-                                      (minibuffer-keyboard-quit)))))
+      (run-at-time 0 nil (lambda ()
+                           (when (and (minibufferp)
+                                      (fboundp 'abort-recursive-edit))
+                             (abort-recursive-edit)))))
     buf))
 
 (defun raindrop-search--parse-edit-buffer ()
+  "Parse current edit buffer into update payload."
   (save-excursion
     (goto-char (point-min))
     (let (title link tags excerpt)
-      (when (re-search-forward "^Title:\\s-*\\(.*\\)$" nil t)
+      (when (re-search-forward "^Title:\\s-*\KATEX_INLINE_OPEN.*\KATEX_INLINE_CLOSE$" nil t)
         (setq title (string-trim (substring-no-properties (match-string 1)))))
       (goto-char (point-min))
-      (when (re-search-forward "^Link:\\s-*\\(.*\\)$" nil t)
+      (when (re-search-forward "^Link:\\s-*\KATEX_INLINE_OPEN.*\KATEX_INLINE_CLOSE$" nil t)
         (setq link (string-trim (substring-no-properties (match-string 1)))))
       (goto-char (point-min))
-      (when (re-search-forward "^Tags:\\s-*\\(.*\\)$" nil t)
+      (when (re-search-forward "^Tags:\\s-*\KATEX_INLINE_OPEN.*\KATEX_INLINE_CLOSE$" nil t)
         (let* ((raw (substring-no-properties (match-string 1)))
                (parts (split-string raw "\\s-*,\\s-*" t))
                (norm (mapcar (lambda (s)
@@ -545,9 +552,31 @@ app URL for the item."
                     (excerpt . ,excerpt))))))
 
 ;;;###autoload
+(defun raindrop-search-embark-open-link (cand)
+  "Open the original link for CAND."
+  (let* ((idx (cl-position cand (raindrop-search--ui-candidates) :test #'string=))
+         (it (or (and idx (nth idx raindrop-search--items))
+                 (and (stringp cand) (gethash cand raindrop-search--cand-map)))))
+    (if it
+        (and-let* ((url (or (raindrop-search--kv it :link)
+                            (raindrop-search--kv it 'link))))
+          (browse-url url))
+      (message "No item for this candidate."))))
+
+;;;###autoload
+(defun raindrop-search-embark-open-raindrop (cand)
+  "Open the Raindrop app URL for CAND."
+  (let* ((idx (cl-position cand (raindrop-search--ui-candidates) :test #'string=))
+         (it (or (and idx (nth idx raindrop-search--items))
+                 (and (stringp cand) (gethash cand raindrop-search--cand-map)))))
+    (if it
+        (and-let* ((url (funcall raindrop-search-raindrop-url-builder it)))
+          (browse-url url))
+      (message "No item for this candidate."))))
+
+;;;###autoload
 (defun raindrop-search-embark-edit (cand)
-  "Open an editable buffer for the Raindrop item represented by CAND.
-CAND is a completion string from the minibuffer list."
+  "Open an editable buffer for the Raindrop item represented by CAND."
   (let* ((idx (cl-position cand (raindrop-search--ui-candidates) :test #'string=))
          (it (or (and idx (nth idx raindrop-search--items))
                  (and (stringp cand) (gethash cand raindrop-search--cand-map)))))
@@ -574,7 +603,7 @@ CAND is a completion string from the minibuffer list."
 (defun raindrop-search-edit-save ()
   "Save changes from the current Raindrop edit buffer back to Raindrop."
   (interactive)
-  (unless (boundp 'raindrop-search--edit-item-id)
+  (unless (bound-and-true-p raindrop-search--edit-item-id)
     (user-error "Not a raindrop edit buffer"))
   (let ((id raindrop-search--edit-item-id))
     (if (or (null id) (not (integerp id)))
@@ -594,6 +623,7 @@ CAND is a completion string from the minibuffer list."
   (quit-window t (selected-window)))
 
 (with-eval-after-load 'embark
+  (defvar embark-keymap-alist)
   (defvar raindrop-search-embark-map
     (let ((m (make-sparse-keymap)))
       (define-key m (kbd "o") #'raindrop-search-embark-open-link)

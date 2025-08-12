@@ -100,12 +100,20 @@
 
 (defun raindrop-org--format-tags (tags)
   "Return a formatted tags suffix for TAGS or nil when empty."
-  (when (and raindrop-org-render-tags
-             (listp tags)
-             (seq-some (lambda (x) (and x (not (string-empty-p (format "%s" x))))) tags))
-    (let* ((names (mapcar (lambda (tag) (if (symbolp tag) (symbol-name tag) (format "%s" tag))) tags))
-           (san (mapcar #'raindrop-org--sanitize names)))
-      (format "  (%s)" (string-join san ", ")))))
+  (when raindrop-debug-enable
+    (message "raindrop-org: format-tags input=%S (listp=%S vectorp=%S)" tags (listp tags) (vectorp tags)))
+  (when (and raindrop-org-render-tags tags)
+    (let* ((tag-list (cond
+                      ((vectorp tags) (append tags nil))
+                      ((listp tags) tags)
+                      (t (list tags))))
+           (meaningful-tags (seq-filter (lambda (x) (and x (not (string-empty-p (format "%s" x))))) tag-list)))
+      (when meaningful-tags
+        (let* ((names (mapcar (lambda (tag) (if (symbolp tag) (symbol-name tag) (format "%s" tag))) meaningful-tags))
+               (san (mapcar #'raindrop-org--sanitize names)))
+          (when raindrop-debug-enable
+            (message "raindrop-org: formatted tags=%S" (format "  (%s)" (string-join san ", "))))
+          (format "  (%s)" (string-join san ", ")))))))
 
 (defun raindrop-render-org-list (items)
   "Render ITEMS as an Org bullet list.
@@ -337,39 +345,55 @@ Return plist with :block-beg, :subtree-end and :region."
 
 (defun org-dblock-write:raindrop (params)
   "Writer for the \"raindrop\" dynamic block using PARAMS."
-  (let* ((tags (raindrop-parse-tags (raindrop-org--param params :tags)))
-         (folders (raindrop-parse-folders
-                   (or (raindrop-org--param params :folders)
-                       (raindrop-org--param params :folder))))
-         (match (raindrop-org--normalize-match (raindrop-org--param params :match 'all)))
-         (collection* (raindrop-org--normalize-number
-                       (raindrop-org--param params :collection)
-                       raindrop-default-collection))
-         (limit (raindrop-org--normalize-number
-                 (raindrop-org--param params :limit raindrop-default-limit)
-                 raindrop-default-limit))
-         (items (if (or tags folders)
-                    (apply #'raindrop-fetch
-                           (append (list :match match :limit limit :collection collection*)
-                                   (when tags (list :tags tags))
-                                   (when folders (list :folders folders))))
-                  '()))
-         (smart-raw (raindrop-org--param params :smart raindrop-org-smart-grouping-default))
-         (smart-flag (raindrop-org--truthy smart-raw))
-         (content
-          (cond
-           ((or (null items) (equal items '())) raindrop-links-empty-text)
-           (smart-flag
-            (raindrop-org--render-grouped (raindrop-org--group-items-auto items)))
-           (t (raindrop-render-org-list items)))))
-    (raindrop-org--log "dblock params tags=%S folders=%S match=%s coll=%s limit=%s smart=%s"
-                       tags folders match collection* limit smart-flag)
-    (let ((content-beg (point)))
-      (when (re-search-forward "^#\\+END:" nil t)
-        (delete-region content-beg (match-beginning 0)))
-      (goto-char content-beg)
-      (insert content)
-      (insert "\n"))))
+  (message "raindrop-org: dblock params=%S" params)
+  (let* ((tags-raw (raindrop-org--param params :tags))
+         (tags (raindrop-parse-tags tags-raw)))
+    (message "raindrop-org: tags-raw=%S tags=%S" tags-raw tags)
+    (let* ((folders (raindrop-parse-folders
+                     (or (raindrop-org--param params :folders)
+                         (raindrop-org--param params :folder))))
+           (match (raindrop-org--normalize-match (raindrop-org--param params :match 'all)))
+           (collection* (raindrop-org--normalize-number
+                         (raindrop-org--param params :collection)
+                         raindrop-default-collection))
+           (limit (raindrop-org--normalize-number
+                   (raindrop-org--param params :limit raindrop-default-limit)
+                   raindrop-default-limit))
+           (items (if (or tags folders)
+                      (progn
+                        (message "raindrop-org: calling raindrop-fetch with tags=%S folders=%S match=%S limit=%S collection=%S"
+                                 tags folders match limit collection*)
+                        (let ((fetch-args (append (list :match match :limit limit :collection collection*)
+                                                  (when tags (list :tags tags))
+                                                  (when folders (list :folders folders)))))
+                          (message "raindrop-org: fetch-args=%S" fetch-args)
+                          (condition-case err
+                              (let ((result (apply #'raindrop-fetch fetch-args)))
+                                (message "raindrop-org: fetch result length=%S" (length result))
+                                (message "raindrop-org: first result=%S" (car result))
+                                result)
+                            (error 
+                             (message "raindrop-org: fetch error=%S" err)
+                             '()))))
+                    (progn
+                      (message "raindrop-org: no tags or folders, returning empty list")
+                      '())))
+           (smart-raw (raindrop-org--param params :smart raindrop-org-smart-grouping-default))
+           (smart-flag (raindrop-org--truthy smart-raw))
+           (content
+            (cond
+             ((or (null items) (equal items '())) raindrop-links-empty-text)
+             (smart-flag
+              (raindrop-org--render-grouped (raindrop-org--group-items-auto items)))
+             (t (raindrop-render-org-list items)))))
+      (raindrop-org--log "dblock params tags=%S folders=%S match=%s coll=%s limit=%s smart=%s"
+                         tags folders match collection* limit smart-flag)
+      (let ((content-beg (point)))
+        (when (re-search-forward "^#\\+END:" nil t)
+          (delete-region content-beg (match-beginning 0)))
+        (goto-char content-beg)
+        (insert content)
+        (insert "\n")))))
 
 ;;;###autoload
 (defun raindrop-insert-or-update-links-under-heading (&optional use-any)
@@ -386,17 +410,19 @@ With optional prefix USE-ANY, use OR semantics for heading tags."
         (goto-char (marker-position heading-marker))
         (let* ((info (raindrop-org--ensure-block tags match)))
           (raindrop-org--replace-content (plist-get info :region) "- Loading…")))
-      (raindrop-fetch-async
-       (list :tags tags :match match
-             :collection raindrop-default-collection
-             :limit raindrop-default-limit)
-       (lambda (items err)
-         (raindrop-org--with-region-at-heading
-          org-buf heading-marker
-          (lambda (region)
-            (raindrop-org--replace-content
-             region
-             (raindrop-org--render-result items err))))))
+      (let ((input (string-join
+                    (mapcar (lambda (tag) (concat "#" tag)) tags)
+                    " ")))
+        (raindrop-search-bookmarks 
+         input
+         (lambda (items err)
+           (raindrop-org--with-region-at-heading
+            org-buf heading-marker
+            (lambda (region)
+              (raindrop-org--replace-content
+               region
+               (raindrop-org--render-result items err)))))
+         raindrop-default-limit))
       (when (markerp heading-marker) (set-marker heading-marker nil)))))
 
 (provide 'raindrop-org)
