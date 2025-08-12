@@ -41,6 +41,11 @@
   "Raindrop → Org integration."
   :group 'convenience)
 
+(defcustom raindrop-debug nil
+  "Enable debug messages for raindrop operations."
+  :type 'boolean
+  :group 'raindrop)
+
 (defcustom raindrop-api-base "https://api.raindrop.io/rest/v1"
   "Base URL for Raindrop REST API."
   :type 'string
@@ -101,6 +106,11 @@ collection."
   "Cached list of collections as returned by `/collections` (value of 'items).")
 
 ;;;; Small helpers (pure where possible)
+
+(defun raindrop--debug (fmt &rest args)
+  "Log debug message if `raindrop-debug' is enabled."
+  (when raindrop-debug
+    (message "raindrop.el: %s" (apply #'format fmt args))))
 
 (defun raindrop--mask (s)
   "Return masked version of secret string S for logs."
@@ -285,8 +295,8 @@ Return parsed JSON as alist. Signal `user-error` for HTTP or parse errors."
          (type (pcase method ('GET "GET") ('PUT "PUT") ('POST "POST") ('DELETE "DELETE") (_ "GET")))
          (result-data nil)
          (result-error nil))
-    (when raindrop-debug-enable
-      (message "raindrop.el: [sync] %s %s" type url))
+    (when raindrop-debug
+      (raindrop--debug "[sync] %s %s" type url))
     (request url
       :type type
       :headers headers
@@ -318,8 +328,8 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
          (json-data (when data (json-encode data)))
          (type (pcase method ('GET "GET") ('PUT "PUT") ('POST "POST") ('DELETE "DELETE") (_ "GET")))
          (cb (or callback #'ignore)))
-    (when raindrop-debug-enable
-      (message "raindrop.el: [async] %s %s" type url))
+    (when raindrop-debug
+      (raindrop--debug "[async] %s %s" type url))
     (request url
       :type type 
       :headers headers 
@@ -443,9 +453,9 @@ Returns cons (ENDPOINT . QUERY-PARAMS)."
 (defun raindrop--normalize-items (items)
   "Normalize a list of raw ITEMS."
   (let ((item-list (if (and items (listp items)) items '())))
-    (message "raindrop.el: normalize-items input count=%S" (length item-list))
+    (raindrop--debug "normalize-items input count=%S" (length item-list))
     (let ((result (mapcar #'raindrop--normalize-item item-list)))
-      (message "raindrop.el: normalize-items output count=%S" (length result))
+      (raindrop--debug "normalize-items output count=%S" (length result))
       result)))
 
 ;;;; Query planning (shared between sync/async)
@@ -487,7 +497,7 @@ Returns cons (ENDPOINT . QUERY-PARAMS)."
 :collection (number or 0 for all), :limit (int), :sort (symbol), :match ('all|'any).
 Returns list of normalized items."
   (when raindrop-debug-enable
-    (message "raindrop.el: fetch %S" plist))
+    (raindrop--debug "fetch %S" plist))
   (let* ((tags (plist-get plist :tags))
          (folders (or (plist-get plist :folders)
                       (let ((f (plist-get plist :folder))) (and f (list f)))))
@@ -497,12 +507,12 @@ Returns list of normalized items."
                   (mapcar (lambda (tag) (concat "#" tag)) (or tags '()))
                   (mapcar (lambda (folder) (concat "[" folder "]")) (or folders '())))
                  " ")))
-    (when raindrop-debug-enable
-      (message "raindrop.el: fetch input=%S limit=%S" input limit))
+    (when raindrop-debug
+      (raindrop--debug "fetch input=%S limit=%S" input limit))
     (if (string-empty-p (string-trim input))
         '()  ; Return empty list if no search criteria
       (progn
-        (message "raindrop.el: calling raindrop-search-bookmarks with input=%S limit=%S" input limit)
+        (raindrop--debug "calling raindrop-search-bookmarks with input=%S limit=%S" input limit)
         (raindrop-search-bookmarks input nil limit)))))
 
 (defun raindrop-fetch-async (plist callback)
@@ -516,8 +526,8 @@ Returns list of normalized items."
                   (mapcar (lambda (tag) (concat "#" tag)) (or tags '()))
                   (mapcar (lambda (folder) (concat "[" folder "]")) (or folders '())))
                  " ")))
-    (when raindrop-debug-enable
-      (message "raindrop.el: fetch-async input=%S limit=%S" input limit))
+    (when raindrop-debug
+      (raindrop--debug "fetch-async input=%S limit=%S" input limit))
     (if (string-empty-p (string-trim input))
         (funcall callback '() nil)  ; Return empty list if no search criteria
       (raindrop-search-bookmarks input callback limit))))
@@ -609,15 +619,15 @@ tags (list of {_id count}), types (list of {_id count})."
   (unless (or raindrop--collections-ready
               raindrop--collections-loading)
     (setq raindrop--collections-loading t)
-    (when raindrop-debug-enable
-      (message "raindrop.el: loading collections…"))
+    (when raindrop-debug
+      (raindrop--debug "loading collections…"))
     (raindrop-api-request-async
      "/collections" 'GET nil nil
      (lambda (res err)
        (setq raindrop--collections-loading nil)
        (if err
-           (when raindrop-debug-enable
-             (message "raindrop.el: collections load error: %s" err))
+           (when raindrop-debug
+             (raindrop--debug "collections load error: %s" err))
          (let ((items (alist-get 'items res)))
            (when (vectorp items)
              (setq items (append items nil)))
@@ -656,10 +666,10 @@ Returns normalized items list (sync) or calls CALLBACK with (items err)."
          (pair (raindrop--build-search-endpoint-and-query coll-id search page limit))
          (endpoint (car pair))
          (query (cdr pair)))
-    (when raindrop-debug-enable
-      (message "raindrop.el: search=%S endpoint=%s" (if (string-empty-p search) nil search) endpoint))
-  (message "raindrop.el: parsed input - tags=%S folders=%S text=%S" tags folders text)
-  (message "raindrop.el: search string=%S endpoint=%s" search endpoint)
+    (when raindrop-debug
+      (raindrop--debug "search=%S endpoint=%s" (if (string-empty-p search) nil search) endpoint))
+  (raindrop--debug "parsed input - tags=%S folders=%S text=%S" tags folders text)
+  (raindrop--debug "search string=%S endpoint=%s" search endpoint)
     (if callback
         (raindrop-api-request-async
          endpoint 'GET query nil
@@ -678,11 +688,11 @@ Returns normalized items list (sync) or calls CALLBACK with (items err)."
       (let* ((payload (raindrop-api-request endpoint 'GET query nil))
              (items-raw (alist-get 'items payload))
              (items (if (vectorp items-raw) (append items-raw nil) items-raw)))
-        (message "raindrop.el: API response - payload keys=%S items count=%S (vectorp=%S)" 
+        (raindrop--debug "API response - payload keys=%S items count=%S (vectorp=%S)" 
                  (mapcar #'car payload) (length items) (vectorp items-raw))
-        (message "raindrop.el: first raw item=%S" (car items))
+        (raindrop--debug "first raw item=%S" (car items))
         (let ((normalized (raindrop--normalize-items items)))
-          (message "raindrop.el: normalized count=%S first normalized=%S" 
+          (raindrop--debug "normalized count=%S first normalized=%S" 
                    (length normalized) (car normalized))
           normalized)))))
 
@@ -704,7 +714,7 @@ Useful for discovering valid collection IDs for /raindrops/{id} requests."
   (interactive)
   (setq raindrop--collections-cache nil)
   (when raindrop-debug-enable
-    (message "raindrop.el: collections cache cleared")))
+    (raindrop--debug "collections cache cleared")))
 
 ;;;; Minimal debug helpers
 

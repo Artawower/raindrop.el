@@ -32,6 +32,11 @@
   "Completion UI for Raindrop."
   :group 'convenience)
 
+(defun raindrop-search--debug (fmt &rest args)
+  "Log debug message if `raindrop-debug' is enabled."
+  (when (bound-and-true-p raindrop-debug)
+    (message "[raindrop-search] %s" (apply #'format fmt args))))
+
 (defface raindrop-search-tag
   '((t :inherit font-lock-keyword-face :foreground "DodgerBlue3"))
   "Face for tags in completion results."
@@ -128,9 +133,6 @@ URL string."
 (defvar-local raindrop-search--edit-item-id nil
   "ID of the item being edited in the current buffer.")
 
-(defun raindrop-search--log (fmt &rest args)
-  "Log a formatted message with FMT and ARGS."
-  (message "[raindrop-search] %s" (apply #'format fmt args)))
 
 (defun raindrop-search--start-spinner ()
   "Start the loading spinner animation."
@@ -296,7 +298,7 @@ URL string."
                   (mapcar (lambda (folder) (concat "[" folder "]")) folders)
                   (and text (not (string-empty-p text)) (list text)))
                  " ")))
-    (raindrop-search--log "fetch(gen=%s) input=%S" gen input)
+    (raindrop-search--debug "fetch(gen=%s) input=%S" gen input)
     (raindrop-search-bookmarks
      input
      (lambda (items err)
@@ -313,7 +315,7 @@ URL string."
          (parsed (raindrop-search--parse input)))
     (when (and (equal input raindrop-search--last-input)
                (raindrop-search--meaningful-input-p parsed))
-      (raindrop-search--log "idle fire input=%S" input)
+      (raindrop-search--debug "idle fire input=%S" input)
       (raindrop-search--start-spinner)
       (setq raindrop-search--last-gen (1+ raindrop-search--last-gen))
       (raindrop-search--fetch raindrop-search--last-gen 0 parsed))))
@@ -402,7 +404,7 @@ app URL for the item."
   (interactive)
   (setq raindrop-search-enter-action (pcase raindrop-search-enter-action
                                        ('link 'raindrop) (_ 'link)))
-  (message "raindrop-search: Enter action → %s" raindrop-search-enter-action))
+  (raindrop-search--debug "Enter action → %s" raindrop-search-enter-action))
 
 (defun raindrop-search--minibuffer-setup ()
   "Setup minibuffer for raindrop search."

@@ -1,0 +1,10 @@
+;; -*- mode: emacs-lisp; lexical-binding: t; -*-
+
+(eldev-use-package-archive 'gnu)
+(eldev-use-package-archive 'melpa)
+
+
+(setf eldev-project-main-file "raindrop.el")
+(eldev-add-loading-roots 'test "test")
+(eldev-add-extra-dependencies 'runtime 'request)
+(eldev-add-extra-dependencies 'test 'request)

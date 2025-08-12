@@ -31,6 +31,11 @@
 (require 'seq)
 (require 'raindrop)
 
+(defun raindrop-org--debug (fmt &rest args)
+  "Log debug message if `raindrop-debug' is enabled."
+  (when (bound-and-true-p raindrop-debug)
+    (message "raindrop-org: %s" (apply #'format fmt args))))
+
 (defgroup raindrop-org nil
   "Org integration for raindrop.el."
   :group 'raindrop)
@@ -101,7 +106,7 @@
 (defun raindrop-org--format-tags (tags)
   "Return a formatted tags suffix for TAGS or nil when empty."
   (when raindrop-debug-enable
-    (message "raindrop-org: format-tags input=%S (listp=%S vectorp=%S)" tags (listp tags) (vectorp tags)))
+    (raindrop-org--debug "format-tags input=%S (listp=%S vectorp=%S)" tags (listp tags) (vectorp tags)))
   (when (and raindrop-org-render-tags tags)
     (let* ((tag-list (cond
                       ((vectorp tags) (append tags nil))
@@ -111,8 +116,8 @@
       (when meaningful-tags
         (let* ((names (mapcar (lambda (tag) (if (symbolp tag) (symbol-name tag) (format "%s" tag))) meaningful-tags))
                (san (mapcar #'raindrop-org--sanitize names)))
-          (when raindrop-debug-enable
-            (message "raindrop-org: formatted tags=%S" (format "  (%s)" (string-join san ", "))))
+          (when (bound-and-true-p raindrop-debug)
+            (raindrop-org--debug "formatted tags=%S" (format "  (%s)" (string-join san ", "))))
           (format "  (%s)" (string-join san ", ")))))))
 
 (defun raindrop-render-org-list (items)
@@ -345,10 +350,10 @@ Return plist with :block-beg, :subtree-end and :region."
 
 (defun org-dblock-write:raindrop (params)
   "Writer for the \"raindrop\" dynamic block using PARAMS."
-  (message "raindrop-org: dblock params=%S" params)
+  (raindrop-org--debug "dblock params=%S" params)
   (let* ((tags-raw (raindrop-org--param params :tags))
          (tags (raindrop-parse-tags tags-raw)))
-    (message "raindrop-org: tags-raw=%S tags=%S" tags-raw tags)
+    (raindrop-org--debug "tags-raw=%S tags=%S" tags-raw tags)
     (let* ((folders (raindrop-parse-folders
                      (or (raindrop-org--param params :folders)
                          (raindrop-org--param params :folder))))
@@ -361,22 +366,22 @@ Return plist with :block-beg, :subtree-end and :region."
                    raindrop-default-limit))
            (items (if (or tags folders)
                       (progn
-                        (message "raindrop-org: calling raindrop-fetch with tags=%S folders=%S match=%S limit=%S collection=%S"
+                        (raindrop-org--debug "calling raindrop-fetch with tags=%S folders=%S match=%S limit=%S collection=%S"
                                  tags folders match limit collection*)
                         (let ((fetch-args (append (list :match match :limit limit :collection collection*)
                                                   (when tags (list :tags tags))
                                                   (when folders (list :folders folders)))))
-                          (message "raindrop-org: fetch-args=%S" fetch-args)
+                          (raindrop-org--debug "fetch-args=%S" fetch-args)
                           (condition-case err
                               (let ((result (apply #'raindrop-fetch fetch-args)))
-                                (message "raindrop-org: fetch result length=%S" (length result))
-                                (message "raindrop-org: first result=%S" (car result))
+                                (raindrop-org--debug "fetch result length=%S" (length result))
+                                (raindrop-org--debug "first result=%S" (car result))
                                 result)
                             (error 
-                             (message "raindrop-org: fetch error=%S" err)
+                             (raindrop-org--debug "fetch error=%S" err)
                              '()))))
                     (progn
-                      (message "raindrop-org: no tags or folders, returning empty list")
+                      (raindrop-org--debug "no tags or folders, returning empty list")
                       '())))
            (smart-raw (raindrop-org--param params :smart raindrop-org-smart-grouping-default))
            (smart-flag (raindrop-org--truthy smart-raw))
