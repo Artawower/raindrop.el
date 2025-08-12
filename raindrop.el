@@ -193,6 +193,24 @@ Prefer quoting for tags containing spaces or commas."
         (nreverse out))))
    (t (list (format "%s" tags)))))
 
+(defun raindrop-parse-tags-with-exclusion (tags)
+  "Parse TAGS into included and excluded tags.
+Supports '-tag' syntax for exclusion in string form.
+Returns plist with :tags and :excluded-tags keys."
+  (let ((parsed-tags (raindrop-parse-tags tags)))
+    (if (not (stringp tags))
+        ;; For non-string input, no exclusion syntax
+        (list :tags parsed-tags :excluded-tags nil)
+      ;; For string input, separate excluded tags
+      (let ((included '())
+            (excluded '()))
+        (dolist (tag parsed-tags)
+          (if (string-prefix-p "-" tag)
+              (push (substring tag 1) excluded)
+            (push tag included)))
+        (list :tags (nreverse included) 
+              :excluded-tags (nreverse excluded))))))
+
 ;; replace the existing raindrop-parse-folders with this version
 (defun raindrop-parse-folders (folders)
   "Normalize FOLDERS to a list of strings.
@@ -345,21 +363,26 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
 ;;;; Search parsing and query building
 
 (defun raindrop--parse-search-input (s)
-  "Parse search input S into tags, folders, and text components.
-Returns plist with :tags :folders :text keys."
+  "Parse search input S into tags, folders, excluded-tags, and text components.
+Returns plist with :tags :excluded-tags :folders :text keys.
+Supports '#tag' for inclusion, '-#tag' for exclusion."
   (let* ((s (or s ""))
          (tokens (split-string s "[ \t]+" t))
          (tags '())
+         (excluded-tags '())
          (folders '())
          (texts '())
          (tag-re (rx string-start "#" (group (+ (any alnum ?- ?_ ?+ ?.))) string-end))
+         (excluded-tag-re (rx string-start "-#" (group (+ (any alnum ?- ?_ ?+ ?.))) string-end))
          (folder-re (rx string-start "[" (group (*? (not (any "]")))) "]" string-end)))
     (dolist (tok tokens)
       (cond
+       ((string-match excluded-tag-re tok) (push (downcase (match-string 1 tok)) excluded-tags))
        ((string-match tag-re tok) (push (downcase (match-string 1 tok)) tags))
        ((string-match folder-re tok) (push (match-string 1 tok) folders))
        (t (push tok texts))))
     (list :tags (nreverse tags)
+          :excluded-tags (nreverse excluded-tags)
           :folders (nreverse folders)
           :text (string-join (nreverse texts) " "))))
 
@@ -367,16 +390,19 @@ Returns plist with :tags :folders :text keys."
   "Check if PARSED search input has meaningful content for searching."
   (let ((text (plist-get parsed :text))
         (tags (plist-get parsed :tags))
+        (excluded-tags (plist-get parsed :excluded-tags))
         (folders (plist-get parsed :folders)))
     (or (and text (>= (length text) 2))
         (and (listp tags) (> (length tags) 0))
+        (and (listp excluded-tags) (> (length excluded-tags) 0))
         (and (listp folders) (> (length folders) 0)))))
 
-(defun raindrop--compose-search-string (text tags)
-  "Compose a search string from TEXT and TAGS for Raindrop API."
+(defun raindrop--compose-search-string (text tags &optional excluded-tags)
+  "Compose a search string from TEXT, TAGS, and EXCLUDED-TAGS for Raindrop API."
   (string-join
    (delq nil
          (list (and (listp tags) tags (raindrop--build-tag-search tags 'all))
+               (and (listp excluded-tags) excluded-tags (raindrop--build-excluded-tag-search excluded-tags))
                (and text (not (string-empty-p text)) text)))
    " "))
 
@@ -427,6 +453,22 @@ Returns cons (ENDPOINT . QUERY-PARAMS)."
 (defun raindrop--build-tag-search (tags match)
   "Build a search string for TAGS honoring MATCH ('all|'any)."
   (raindrop--build-search tags nil match))
+
+(defun raindrop--quote-tag-name (tag)
+  "Quote TAG name for API search without # prefix."
+  (let ((s (if (symbolp tag) (symbol-name tag) tag)))
+    (if (string-match-p "[\t\n\r ]" s)
+        (concat "\"" (replace-regexp-in-string "\"" "\\\"" s) "\"")
+      s)))
+
+(defun raindrop--build-excluded-tag-search (excluded-tags)
+  "Build a search string for EXCLUDED-TAGS using NOT operators.
+According to Raindrop API, you can exclude tags using '-tag'."
+  (when (and excluded-tags (listp excluded-tags))
+    (string-join
+     (mapcar (lambda (tag) (format "-%s" (raindrop--quote-tag tag)))
+             excluded-tags)
+     " ")))
 
 ;;;; Normalization
 
@@ -493,18 +535,20 @@ Returns cons (ENDPOINT . QUERY-PARAMS)."
 
 (defun raindrop-fetch (&rest plist)
   "Fetch raindrops according to PLIST keys:
-:tags (list or string), :folders (list/string) or :folder (string),
+:tags (list or string), :excluded-tags (list or string), :folders (list/string) or :folder (string),
 :collection (number or 0 for all), :limit (int), :sort (symbol), :match ('all|'any).
 Returns list of normalized items."
-  (when raindrop-debug-enable
+  (when raindrop-debug
     (raindrop--debug "fetch %S" plist))
   (let* ((tags (plist-get plist :tags))
+         (excluded-tags (plist-get plist :excluded-tags))
          (folders (or (plist-get plist :folders)
                       (let ((f (plist-get plist :folder))) (and f (list f)))))
          (limit (or (plist-get plist :limit) raindrop-default-limit))
          (input (string-join 
                  (append 
                   (mapcar (lambda (tag) (concat "#" tag)) (or tags '()))
+                  (mapcar (lambda (tag) (concat "-#" tag)) (or excluded-tags '()))
                   (mapcar (lambda (folder) (concat "[" folder "]")) (or folders '())))
                  " ")))
     (when raindrop-debug
@@ -518,12 +562,14 @@ Returns list of normalized items."
 (defun raindrop-fetch-async (plist callback)
   "Asynchronously fetch raindrops according to PLIST and call CALLBACK with (items err)."
   (let* ((tags (plist-get plist :tags))
+         (excluded-tags (plist-get plist :excluded-tags))
          (folders (or (plist-get plist :folders)
                       (let ((f (plist-get plist :folder))) (and f (list f)))))
          (limit (or (plist-get plist :limit) raindrop-default-limit))
          (input (string-join 
                  (append 
                   (mapcar (lambda (tag) (concat "#" tag)) (or tags '()))
+                  (mapcar (lambda (tag) (concat "-#" tag)) (or excluded-tags '()))
                   (mapcar (lambda (folder) (concat "[" folder "]")) (or folders '())))
                  " ")))
     (when raindrop-debug
@@ -656,19 +702,20 @@ If CALLBACK is provided, performs async search, otherwise sync.
 Returns normalized items list (sync) or calls CALLBACK with (items err)."
   (let* ((parsed (raindrop--parse-search-input input))
          (tags (plist-get parsed :tags))
+         (excluded-tags (plist-get parsed :excluded-tags))
          (folders (plist-get parsed :folders))
          (text (plist-get parsed :text))
          (folder-name (car (last folders)))
          (coll-id (or (and folder-name
                            (raindrop--collection-id-by-title folder-name))
                       raindrop-default-collection))
-         (search (raindrop--compose-search-string text tags))
+         (search (raindrop--compose-search-string text tags excluded-tags))
          (pair (raindrop--build-search-endpoint-and-query coll-id search page limit))
          (endpoint (car pair))
          (query (cdr pair)))
     (when raindrop-debug
       (raindrop--debug "search=%S endpoint=%s" (if (string-empty-p search) nil search) endpoint))
-  (raindrop--debug "parsed input - tags=%S folders=%S text=%S" tags folders text)
+  (raindrop--debug "parsed input - tags=%S excluded-tags=%S folders=%S text=%S" tags excluded-tags folders text)
   (raindrop--debug "search string=%S endpoint=%s" search endpoint)
     (if callback
         (raindrop-api-request-async

@@ -43,15 +43,20 @@
 
 (defun raindrop-ob--items (params)
   "Return fetched Raindrop items based on PARAMS."
-  (let* ((tags (raindrop-parse-tags (raindrop-ob--param :tags params nil)))
+  (let* ((tags-input (raindrop-ob--param :tags params nil))
+         (parsed-tags (raindrop-parse-tags-with-exclusion tags-input))
+         (tags (plist-get parsed-tags :tags))
+         (excluded-tags (plist-get parsed-tags :excluded-tags))
          (match (or (raindrop-ob--param :match params 'all) 'all))
          (limit (or (raindrop-ob--param :limit params raindrop-default-limit)
                     raindrop-default-limit))
          (collection (or (raindrop-ob--param :collection params raindrop-default-collection)
                          raindrop-default-collection)))
-    (if tags
+    (if (or tags excluded-tags)
         (apply #'raindrop-fetch
-               (list :tags tags :match match :limit limit :collection collection))
+               (append (list :match match :limit limit :collection collection)
+                       (when tags (list :tags tags))
+                       (when excluded-tags (list :excluded-tags excluded-tags))))
       '())))
 
 (defun raindrop-ob--render (items output)

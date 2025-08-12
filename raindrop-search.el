@@ -290,11 +290,13 @@ URL string."
 (defun raindrop-search--fetch (gen page parsed)
   "Fetch results for GEN at PAGE using PARSED input."
   (let* ((tags (plist-get parsed :tags))
+         (excluded-tags (plist-get parsed :excluded-tags))
          (folders (plist-get parsed :folders))
          (text (plist-get parsed :text))
          (input (string-join
                  (append
                   (mapcar (lambda (tag) (concat "#" tag)) tags)
+                  (mapcar (lambda (tag) (concat "-#" tag)) excluded-tags)
                   (mapcar (lambda (folder) (concat "[" folder "]")) folders)
                   (and text (not (string-empty-p text)) (list text)))
                  " ")))

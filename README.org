@@ -82,6 +82,8 @@ Load packages (autoloads are simple; explicit require is fine):
 ** Interactive Search Interface
 Use =M-x raindrop-search= for an interactive search with as-you-type completion:
 - Search by tags: =#emacs #lisp some text=
+- Exclude tags: =#emacs -#outdated= (include emacs, exclude outdated)  
+- Mixed search: =#programming -#legacy [Work] project=
 - Search by folders: =[Work] project notes=
 - Combined search: =#important [Archive] meeting notes=
 - Animated ASCII spinner during loading
@@ -129,40 +131,61 @@ OR semantics for tags just for this run; default is AND.
 ** Dynamic block (manual)
 You can insert a block yourself and refresh with =C-c C-c=:
 #+BEGIN_EXAMPLE
-#+BEGIN: raindrop :tags emacs lisp :match all :limit 50
+#+BEGIN: raindrop :tags "emacs, -outdated, programming" :match all :limit 50
 #+END:
 #+END_EXAMPLE
 
 Parameters:
-- =:tags= string or list of tags (space/comma separated string works too).
-- =:folder= folder (collection) name to search within (single value).
-- =:folders= alias for =:folder= that also accepts a single name.
-  Note: multiple folders are not yet supported; pass exactly one name.
+- =:tags= string with comma-separated or space-separated tags.
+  Supports exclusion with =-tag= syntax (e.g., ="emacs, -outdated, programming"=).
+  Both formats work: ="cli -openai macos"= or ="cli, -openai, macos"=.
+  Tags with spaces work naturally: ="cli, -openai, -tui with space"=.
+- =:folders= string with comma-separated folder names (e.g., ="work, personal"=).
+- =:folder= alias for =:folders= that accepts a single folder name.
 - =:match= =all= (AND, default) or =any= (OR).
 - =:collection= numeric collection id (optional, =0= means all). If both
-  =:folder= and =:collection= are provided, the folder name is resolved to an
-  ID and takes precedence.
+  =:folders= and =:collection= are provided, the folder names are resolved to
+  IDs and take precedence.
 - =:limit= max items to fetch (default 100).
+- =:smart= enable smart auto-grouping by tags (=t= or =nil=, default =nil=).
 
 Examples:
 - By folder only:
   #+BEGIN_EXAMPLE
-  #+BEGIN: raindrop :folder "Terminal" :match all :limit 20
+  #+BEGIN: raindrop :folders "Terminal" :match all :limit 20
   #+END:
   #+END_EXAMPLE
 - Tags within a folder:
   #+BEGIN_EXAMPLE
-  #+BEGIN: raindrop :folder "Work" :tags cli :match any :limit 30
+  #+BEGIN: raindrop :folders "Work" :tags "cli, -legacy" :match any :limit 30
+  #+END:
+  #+END_EXAMPLE
+- With tag exclusion and smart grouping:
+  #+BEGIN_EXAMPLE
+  #+BEGIN: raindrop :tags "emacs, -outdated, programming" :match all :limit 25 :smart t
+  #+END:
+  #+END_EXAMPLE
+- Tags with spaces and exclusions:
+  #+BEGIN_EXAMPLE
+  #+BEGIN: raindrop :tags "cli, -openai, -tui with space" :match all :output org-list :smart t
   #+END:
   #+END_EXAMPLE
 
 ** Org-babel block
 Returns Org-formatted output; use =:results raw replace=:
-#+BEGIN_SRC raindrop :tags "emacs lisp" :match all :limit 30 :results raw replace
+#+BEGIN_SRC raindrop :tags "emacs, -outdated, programming" :match all :limit 30 :results raw replace
 #+END_SRC
 
-Also works with a folder:
-#+BEGIN_SRC raindrop :folder "Terminal" :match all :limit 20 :results raw replace
+Also works with folders:
+#+BEGIN_SRC raindrop :folders "Terminal, Work" :match all :limit 20 :results raw replace
+#+END_SRC
+
+With tag exclusion and tags with spaces:
+#+BEGIN_SRC raindrop :tags "cli, -windows, -system admin" :match all :limit 15 :results raw replace
+#+END_SRC
+
+Space-separated format also supported:
+#+BEGIN_SRC raindrop :tags "cli -openai macos" :match all :limit 15 :results raw replace
 #+END_SRC
 
 You can also enable via babel languages API:

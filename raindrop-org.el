@@ -140,10 +140,108 @@ Each item is a plist/alist with keys :link, :title, :excerpt, :tags."
    items
    "\n"))
 
+
+(defun raindrop-org--parse-tags-string (tags-string)
+  "Parse TAGS-STRING with comma or space separation into tags and excluded tags.
+Examples:
+  \"cli,-openai,emacs\" -> (:tags (\"cli\" \"emacs\") :excluded-tags (\"openai\"))
+  \"cli -openai emacs\" -> (:tags (\"cli\" \"emacs\") :excluded-tags (\"openai\"))
+  \"cli, -openai, emacs\" -> (:tags (\"cli\" \"emacs\") :excluded-tags (\"openai\"))"
+  (when (and tags-string (not (string-empty-p tags-string)))
+    (let* ((tags '())
+           (excluded-tags '())
+           ;; Split by comma first, then by spaces if no commas
+           (parts (if (string-match-p "," tags-string)
+                      (mapcar #'string-trim (split-string tags-string ","))
+                    (split-string tags-string)))
+           ;; Process each part
+           (processed (dolist (part parts)
+                        (when (and part (not (string-empty-p part)))
+                          (if (string-prefix-p "-" part)
+                              (push (substring part 1) excluded-tags)
+                            (push part tags))))))
+      (list :tags (nreverse tags)
+            :excluded-tags (nreverse excluded-tags)))))
+
+(defun raindrop-org--parse-folders-string (folders-string)
+  "Parse FOLDERS-STRING with comma separation.
+Example: \"folder1,folder2,folder3\" -> (\"folder1\" \"folder2\" \"folder3\")"
+  (when (and folders-string (not (string-empty-p folders-string)))
+    (mapcar #'string-trim (split-string folders-string ","))))
+
+(defun plist-p (list)
+  "Return t if LIST is a valid plist."
+  (and (listp list)
+       (zerop (mod (length list) 2))
+       (cl-every #'keywordp (cl-loop for i from 0 below (length list) by 2
+                                     collect (nth i list)))))
+
+(defun raindrop-org--parse-dblock-params (params)
+  "Parse org-mode dynamic block PARAMS into a proper plist.
+Handles cases where org-mode passes mixed lists like (:name \"raindrop\" :tags cli -openai :match all)."
+  (let ((result '())
+        (current-key nil)
+        (current-values '()))
+    ;; Skip :name field if present
+    (when (eq (car params) :name)
+      (setq params (cddr params)))
+    
+    (dolist (item params)
+      (cond
+       ;; If item is a keyword, it's a new key
+       ((keywordp item)
+        ;; Save previous key-value pair if exists
+        (when current-key
+          (setq result (plist-put result current-key
+                                  (if (= (length current-values) 1)
+                                      (car current-values)
+                                    (reverse current-values)))))
+        ;; Start new key
+        (setq current-key item
+              current-values '()))
+       ;; If item starts with -, it's an exclusion (part of current values)
+       ((and (symbolp item) 
+             (string-prefix-p "-" (symbol-name item)))
+        (when current-key
+          (push item current-values)))
+       ;; Otherwise it's a value for current key
+       (t
+        (when current-key
+          (push item current-values)))))
+    
+    ;; Don't forget the last key-value pair
+    (when current-key
+      (setq result (plist-put result current-key
+                              (if (= (length current-values) 1)
+                                  (car current-values)
+                                (reverse current-values)))))
+    result))
+
 (defun raindrop-org--param (params key &optional default)
   "Get KEY from PARAMS (plist or alist). Return DEFAULT when absent."
-  (let ((v (or (plist-get params key) (alist-get key params))))
-    (if (eq v nil) default v)))
+  (let ((parsed-params 
+         (cond
+          ;; If params has :name field, it's from org-mode
+          ((and (listp params) (eq (car params) :name))
+           (raindrop-org--parse-dblock-params params))
+          ;; If params looks like mixed format
+          ((and (listp params) 
+                (keywordp (car params))
+                (not (plist-p params)))
+           (raindrop-org--parse-dblock-params params))
+          ;; Normal plist or alist
+          (t params))))
+    (let ((v (cond
+              ;; If params is a proper plist
+              ((and (listp parsed-params) (keywordp (car parsed-params)))
+               (plist-get parsed-params key))
+              ;; If params is an alist
+              ((and (listp parsed-params) (consp (car parsed-params)))
+               (alist-get key parsed-params))
+              ;; Otherwise try both
+              (t (or (ignore-errors (plist-get parsed-params key))
+                     (ignore-errors (alist-get key parsed-params)))))))
+      (if (eq v nil) default v))))
 
 (defun raindrop-org--normalize-match (match)
   "Normalize MATCH to the symbol 'all or 'any."
@@ -187,9 +285,15 @@ Each item is a plist/alist with keys :link, :title, :excerpt, :tags."
 
 (defun raindrop-org--insert-skeleton (tags match)
   "Insert an empty dynamic block with TAGS and MATCH at point."
-  (insert (format "#+BEGIN: raindrop :tags %s :match %s :output org-list\n#+END:\n"
-                  (mapconcat #'identity (or tags '()) ",")
-                  match)))
+  (let ((tags-string (if tags
+                         (mapconcat (lambda (tag)
+                                      (if (string-prefix-p "-" tag)
+                                          tag
+                                        tag))
+                                    tags ",")
+                       "")))
+    (insert (format "#+BEGIN: raindrop :tags \"%s\" :match %s\n#+END:\n"
+                    tags-string match))))
 
 (defun raindrop-org--replace-content (region text)
   "Replace REGION (cons BEG . END) with TEXT and a trailing newline."
@@ -349,56 +453,93 @@ Return plist with :block-beg, :subtree-end and :region."
 ;; dynamic block
 
 (defun org-dblock-write:raindrop (params)
-  "Writer for the \"raindrop\" dynamic block using PARAMS."
+  "Writer for the \"raindrop\" dynamic block using PARAMS.
+Supported formats:
+  :tags \"cli,-openai,emacs\"  - comma-separated tags with exclusions
+  :folders \"work,personal\"    - comma-separated folders
+  :match all/any               - matching mode
+  :limit 20                    - number limit
+  :collection 0                - collection ID
+  :smart t                     - enable smart grouping"
   (raindrop-org--debug "dblock params=%S" params)
-  (let* ((tags-raw (raindrop-org--param params :tags))
-         (tags (raindrop-parse-tags tags-raw)))
-    (raindrop-org--debug "tags-raw=%S tags=%S" tags-raw tags)
-    (let* ((folders (raindrop-parse-folders
-                     (or (raindrop-org--param params :folders)
-                         (raindrop-org--param params :folder))))
-           (match (raindrop-org--normalize-match (raindrop-org--param params :match 'all)))
-           (collection* (raindrop-org--normalize-number
-                         (raindrop-org--param params :collection)
-                         raindrop-default-collection))
-           (limit (raindrop-org--normalize-number
-                   (raindrop-org--param params :limit raindrop-default-limit)
-                   raindrop-default-limit))
-           (items (if (or tags folders)
-                      (progn
-                        (raindrop-org--debug "calling raindrop-fetch with tags=%S folders=%S match=%S limit=%S collection=%S"
-                                 tags folders match limit collection*)
-                        (let ((fetch-args (append (list :match match :limit limit :collection collection*)
-                                                  (when tags (list :tags tags))
-                                                  (when folders (list :folders folders)))))
-                          (raindrop-org--debug "fetch-args=%S" fetch-args)
-                          (condition-case err
-                              (let ((result (apply #'raindrop-fetch fetch-args)))
-                                (raindrop-org--debug "fetch result length=%S" (length result))
-                                (raindrop-org--debug "first result=%S" (car result))
-                                result)
-                            (error 
-                             (raindrop-org--debug "fetch error=%S" err)
-                             '()))))
-                    (progn
-                      (raindrop-org--debug "no tags or folders, returning empty list")
-                      '())))
-           (smart-raw (raindrop-org--param params :smart raindrop-org-smart-grouping-default))
-           (smart-flag (raindrop-org--truthy smart-raw))
+  
+  (let* ((tags-raw (plist-get params :tags))
+         ;; Convert tags to string format
+         (tags-string (cond
+                       ((stringp tags-raw) tags-raw)
+                       ((listp tags-raw) 
+                        (mapconcat (lambda (x) (format "%s" x)) tags-raw ","))
+                       ((symbolp tags-raw) (symbol-name tags-raw))
+                       (t nil)))
+         ;; Parse tags and excluded tags
+         (parsed-tags (raindrop-org--parse-tags-string tags-string))
+         (tags (plist-get parsed-tags :tags))
+         (excluded-tags (plist-get parsed-tags :excluded-tags))
+         
+         ;; Parse folders
+         (folders-raw (or (plist-get params :folders)
+                          (plist-get params :folder)))
+         (folders-string (cond
+                          ((stringp folders-raw) folders-raw)
+                          ((listp folders-raw)
+                           (mapconcat (lambda (x) (format "%s" x)) folders-raw ","))
+                          ((symbolp folders-raw) (symbol-name folders-raw))
+                          (t nil)))
+         (folders (raindrop-org--parse-folders-string folders-string))
+         
+         ;; Other parameters - FIX: wrap default value in quotes
+         (match (raindrop-org--normalize-match 
+                 (or (plist-get params :match) 'all)))
+         (collection* (raindrop-org--normalize-number
+                       (plist-get params :collection)
+                       raindrop-default-collection))
+         (limit (raindrop-org--normalize-number
+                 (or (plist-get params :limit) raindrop-default-limit)
+                 raindrop-default-limit))
+         (smart-raw (or (plist-get params :smart) raindrop-org-smart-grouping-default))
+         (smart-flag (raindrop-org--truthy smart-raw)))
+    
+    (raindrop-org--debug "parsed: tags=%S excluded-tags=%S folders=%S" 
+                         tags excluded-tags folders)
+    
+    ;; Fetch items
+    (let* ((items (if (or tags excluded-tags folders)
+                      (condition-case err
+                          (let ((fetch-args (append 
+                                             (list :match match 
+                                                   :limit limit 
+                                                   :collection collection*)
+                                             (when tags 
+                                               (list :tags tags))
+                                             (when excluded-tags 
+                                               (list :excluded-tags excluded-tags))
+                                             (when folders 
+                                               (list :folders folders)))))
+                            (raindrop-org--debug "fetch-args=%S" fetch-args)
+                            (apply #'raindrop-fetch fetch-args))
+                        (error 
+                         (raindrop-org--debug "fetch error=%S" err)
+                         (message "Raindrop fetch error: %s" (error-message-string err))
+                         nil))
+                    '()))
+           ;; Render content
            (content
             (cond
-             ((or (null items) (equal items '())) raindrop-links-empty-text)
+             ((or (null items) (equal items '())) 
+              raindrop-links-empty-text)
              (smart-flag
-              (raindrop-org--render-grouped (raindrop-org--group-items-auto items)))
-             (t (raindrop-render-org-list items)))))
-      (raindrop-org--log "dblock params tags=%S folders=%S match=%s coll=%s limit=%s smart=%s"
-                         tags folders match collection* limit smart-flag)
+              (raindrop-org--render-grouped 
+               (raindrop-org--group-items-auto items)))
+             (t 
+              (raindrop-render-org-list items)))))
+      
+      ;; Insert content
       (let ((content-beg (point)))
         (when (re-search-forward "^#\\+END:" nil t)
           (delete-region content-beg (match-beginning 0)))
         (goto-char content-beg)
         (insert content)
-        (insert "\n")))))
+        (unless (bolp) (insert "\n"))))))
 
 ;;;###autoload
 (defun raindrop-insert-or-update-links-under-heading (&optional use-any)
@@ -410,16 +551,17 @@ With optional prefix USE-ANY, use OR semantics for heading tags."
     (unless (and tags (> (length tags) 0))
       (user-error "raindrop-org: Current heading has no tags"))
     (let* ((org-buf (current-buffer))
-           (heading-marker (raindrop-org--heading-marker)))
+           (heading-marker (raindrop-org--heading-marker))
+           ;; Convert heading tags to comma-separated format
+           (tags-string (mapconcat #'identity tags ",")))
       (save-excursion
         (goto-char (marker-position heading-marker))
         (let* ((info (raindrop-org--ensure-block tags match)))
           (raindrop-org--replace-content (plist-get info :region) "- Loading…")))
-      (let ((input (string-join
-                    (mapcar (lambda (tag) (concat "#" tag)) tags)
-                    " ")))
+      (let* ((parsed (raindrop-org--parse-tags-string tags-string))
+             (search-tags (plist-get parsed :tags)))
         (raindrop-search-bookmarks 
-         input
+         (mapconcat (lambda (tag) (concat "#" tag)) search-tags " ")
          (lambda (items err)
            (raindrop-org--with-region-at-heading
             org-buf heading-marker

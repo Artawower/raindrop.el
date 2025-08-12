@@ -226,7 +226,7 @@
                (let ((error (plist-get args :error)))
                  (when error
                    (funcall error :error-thrown '(error . "HTTP 400: Bad Request")
-                           :response nil)))))
+                            :response nil)))))
             ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
     (should-error (raindrop-api-request "/x" 'GET nil nil) :type 'user-error))
   ;; Test HTTP 500 error  
@@ -235,7 +235,7 @@
                (let ((error (plist-get args :error)))
                  (when error
                    (funcall error :error-thrown '(error . "HTTP 500: Server Error")
-                           :response nil)))))
+                            :response nil)))))
             ((symbol-function 'raindrop--get-token) (lambda () "TOK")))
     (should-error (raindrop-api-request "/x" 'GET nil nil) :type 'user-error)))
 
@@ -563,5 +563,107 @@
         (should (re-search-forward "\\[\\[https://a\\]\\[A\\]\\]" nil t))
         (goto-char (point-min))
         (should (re-search-forward "\\[\\[https://b\\]\\[B\\]\\]" nil t))))))
+
+;; Tag exclusion tests
+
+(ert-deftest raindrop-parse-tags-with-exclusion-basic ()
+  "Test basic tag exclusion parsing."
+  (let ((result (raindrop-parse-tags-with-exclusion "tag1, -tag2, tag3")))
+    (should (equal (plist-get result :tags) '("tag1" "tag3")))
+    (should (equal (plist-get result :excluded-tags) '("tag2")))))
+
+(ert-deftest raindrop-parse-tags-with-exclusion-no-exclusion ()
+  "Test parsing without excluded tags."
+  (let ((result (raindrop-parse-tags-with-exclusion "tag1, tag2")))
+    (should (equal (plist-get result :tags) '("tag1" "tag2")))
+    (should (equal (plist-get result :excluded-tags) nil))))
+
+(ert-deftest raindrop-parse-tags-with-exclusion-only-exclusion ()
+  "Test parsing with only excluded tags."
+  (let ((result (raindrop-parse-tags-with-exclusion "-tag1, -tag2")))
+    (should (equal (plist-get result :tags) nil))
+    (should (equal (plist-get result :excluded-tags) '("tag1" "tag2")))))
+
+(ert-deftest raindrop-parse-tags-with-exclusion-list-input ()
+  "Test exclusion parsing with list input (no exclusion support)."
+  (let ((result (raindrop-parse-tags-with-exclusion '("tag1" "tag2"))))
+    (should (equal (plist-get result :tags) '("tag1" "tag2")))
+    (should (equal (plist-get result :excluded-tags) nil))))
+
+(ert-deftest raindrop-search-input-parsing-with-exclusion ()
+  "Test search input parsing with excluded tags using -# syntax."
+  (let ((parsed (raindrop--parse-search-input "#include -#exclude [folder] text")))
+    (should (equal (plist-get parsed :tags) '("include")))
+    (should (equal (plist-get parsed :excluded-tags) '("exclude")))
+    (should (equal (plist-get parsed :folders) '("folder")))
+    (should (equal (plist-get parsed :text) "text"))))
+
+(ert-deftest raindrop-build-excluded-tag-search ()
+  "Test building excluded tag search string."
+  (should (equal (raindrop--build-excluded-tag-search '("tag1" "tag2"))
+                 "-#tag1 -#tag2"))
+  (should (equal (raindrop--build-excluded-tag-search '("spaced tag"))
+                 "-#\"spaced tag\""))
+  (should (equal (raindrop--build-excluded-tag-search nil) nil)))
+
+(ert-deftest raindrop-compose-search-string-with-exclusion ()
+  "Test composing search string with excluded tags."
+  (should (string-match-p "#include.*-#exclude"
+                          (raindrop--compose-search-string "text" '("include") '("exclude")))))
+
+(ert-deftest raindrop-parse-tags-with-exclusion-spaced-tags ()
+  "Test parsing tags with spaces using comma separation."
+  ;; Test with comma-separated format (new org parsing function)
+  (let ((result (raindrop-org--parse-tags-string "file manager, -outdated, cli")))
+    (should (equal (plist-get result :tags) '("file manager" "cli")))
+    (should (equal (plist-get result :excluded-tags) '("outdated")))))
+
+(ert-deftest raindrop-build-excluded-tag-search-with-spaces ()
+  "Test building excluded tag search string with spaced tags."
+  (should (equal (raindrop--build-excluded-tag-search '("old tool"))
+                 "-#\"old tool\"")))
+
+;; Test org-babel parameter parsing
+
+(ert-deftest raindrop-ob-comma-separated-tags ()
+  "Test that ob-raindrop can handle comma-separated tags without quotes."
+  (require 'ob-raindrop)
+  ;; Test basic comma separation without spaces in tags
+  (let ((params '((:tags . "cli, -windows, macos"))))
+    (let* ((tags-input (raindrop-ob--param :tags params nil))
+           (parsed-tags (raindrop-parse-tags-with-exclusion tags-input))
+           (tags (plist-get parsed-tags :tags))
+           (excluded-tags (plist-get parsed-tags :excluded-tags)))
+      (should (equal tags '("cli" "macos")))
+      (should (equal excluded-tags '("windows"))))))
+
+
+(ert-deftest raindrop-org-parse-tags-string-with-spaces ()
+  "Test new org tag parsing function with tags containing spaces."
+  (let ((result (raindrop-org--parse-tags-string "cli, -openai, -tui with space")))
+    (should (equal (plist-get result :tags) '("cli")))
+    (should (equal (plist-get result :excluded-tags) '("openai" "tui with space"))))
+  
+  ;; Test space-separated format
+  (let ((result (raindrop-org--parse-tags-string "cli -openai macos")))
+    (should (equal (plist-get result :tags) '("cli" "macos")))
+    (should (equal (plist-get result :excluded-tags) '("openai")))))
+
+(ert-deftest raindrop-org-dblock-new-implementation ()
+  "Test that new dblock implementation correctly parses parameters."
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+BEGIN: raindrop :tags \"cli, -openai, -tui with space\" :match all :limit 5\n#+END:\n")
+    (goto-char (point-min))
+    (let (parsed-tags parsed-excluded-tags)
+      (cl-letf (((symbol-function 'raindrop-fetch)
+                 (lambda (&rest plist)
+                   (setq parsed-tags (plist-get plist :tags))
+                   (setq parsed-excluded-tags (plist-get plist :excluded-tags))
+                   nil)))
+        (org-dblock-write:raindrop '(:tags "cli, -openai, -tui with space" :match all :limit 5))
+        (should (equal parsed-tags '("cli")))
+        (should (equal parsed-excluded-tags '("openai" "tui with space")))))))
+
 
 ;;; raindrop-core-tests.el ends here
