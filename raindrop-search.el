@@ -18,6 +18,7 @@
 (require 'subr-x)
 (require 'seq)
 (require 'cl-lib)
+(require 'raindrop)
 
 (declare-function raindrop--kv "raindrop" (item key))
 (declare-function raindrop--collection-id-by-title "raindrop" (title))
