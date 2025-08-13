@@ -36,6 +36,12 @@ language model (OpenAI). Requirements and vision were provided by the author.
 - [[https://developer.raindrop.io][Raindrop API Documentation]]
 - [[https://raindrop.io][Raindrop service]]
 
+* Screenshots
+Search interface
+[[./images/search.png]]
+Dynamic block
+[[./images/org.png]]
+
 * Install
 This package requires Emacs 27.1+ and Org 9.4+.
 
