@@ -40,13 +40,40 @@ language model (OpenAI). Requirements and vision were provided by the author.
 This package requires Emacs 27.1+ and Org 9.4+.
 
 ** Elpaca
-#+BEGIN_SRC emacs-lisp
+#+BEGIN_SRC emacs-lisp :results silent
 (use-package raindrop
-  :ensure (:host github :repo "artawower/raindrop.el"))
+  :defer t
+  :ensure (raindrop :host github :repo "artawower/raindrop.el"))
+#+END_SRC
 
-(use-package raindrop-org :after org)
-(use-package raindrop-search)
-(use-package ob-raindrop :after org)
+Org integration
+#+BEGIN_SRC emacs-lisp :results silent
+(use-package raindrop-org
+  :after raindrop
+  :ensure nil
+  :defer t)
+#+END_SRC
+
+Raindrop search
+#+BEGIN_SRC emacs-lisp :results silent
+(use-package raindrop-search
+  :ensure nil
+  :after raindrop
+  :bind (("C-c r s" . raindrop-search))
+  :defer t)
+#+END_SRC
+
+Ob raindrop (dynamic block)
+#+BEGIN_SRC emacs-lisp :results silent
+(use-package ob-raindrop
+  :after (org raindrop)
+  :commands (org-babel-execute:raindrop)
+  :ensure nil
+  :init
+  (with-eval-after-load 'org
+    (add-to-list 'org-babel-load-languages '(raindrop . t))
+    (when (boundp 'org-babel-load-languages)
+      (org-babel-do-load-languages 'org-babel-load-languages org-babel-load-languages))))
 #+END_SRC
 
 ** package-vc (Emacs 29+)
