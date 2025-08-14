@@ -620,14 +620,19 @@ Returns list of normalized items."
          (folders (or (plist-get plist :folders)
                       (let ((f (plist-get plist :folder))) (and f (list f)))))
          (search-text (plist-get plist :search))
+         (match (or (plist-get plist :match) 'all))
          (limit (or (plist-get plist :limit) raindrop-default-limit))
          (input (string-join 
-                 (append 
-                  (mapcar (lambda (tag) (raindrop--quote-tag tag)) (or tags '()))
-                  (mapcar (lambda (tag) (concat "-" (raindrop--quote-tag tag))) (or excluded-tags '()))
-                  (mapcar (lambda (folder) (concat "[" folder "]")) (or folders '()))
-                  (when (and search-text (not (string-empty-p (string-trim search-text))))
-                    (list (string-trim search-text))))
+                 (delq nil
+                   (append 
+                    (when tags 
+                      (list (raindrop--build-tag-search tags match)))
+                    (when excluded-tags
+                      (list (raindrop--build-excluded-tag-search excluded-tags)))
+                    (when folders
+                      (list (string-join (mapcar (lambda (folder) (concat "[" folder "]")) folders) " ")))
+                    (when (and search-text (not (string-empty-p (string-trim search-text))))
+                      (list (string-trim search-text)))))
                  " ")))
     (when raindrop-debug
       (raindrop--debug "fetch input=%S limit=%S" input limit))
@@ -644,14 +649,19 @@ Returns list of normalized items."
          (folders (or (plist-get plist :folders)
                       (let ((f (plist-get plist :folder))) (and f (list f)))))
          (search-text (plist-get plist :search))
+         (match (or (plist-get plist :match) 'all))
          (limit (or (plist-get plist :limit) raindrop-default-limit))
          (input (string-join 
-                 (append 
-                  (mapcar (lambda (tag) (concat "#" tag)) (or tags '()))
-                  (mapcar (lambda (tag) (concat "-#" tag)) (or excluded-tags '()))
-                  (mapcar (lambda (folder) (concat "[" folder "]")) (or folders '()))
-                  (when (and search-text (not (string-empty-p (string-trim search-text))))
-                    (list (string-trim search-text))))
+                 (delq nil
+                   (append 
+                    (when tags 
+                      (list (raindrop--build-tag-search tags match)))
+                    (when excluded-tags
+                      (list (raindrop--build-excluded-tag-search excluded-tags)))
+                    (when folders
+                      (list (string-join (mapcar (lambda (folder) (concat "[" folder "]")) folders) " ")))
+                    (when (and search-text (not (string-empty-p (string-trim search-text))))
+                      (list (string-trim search-text)))))
                  " ")))
     (when raindrop-debug
       (raindrop--debug "fetch-async input=%S limit=%S" input limit))
