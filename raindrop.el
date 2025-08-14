@@ -365,22 +365,97 @@ CALLBACK is called as (func RESULT ERR), where only one of RESULT/ERR is non-nil
 (defun raindrop--parse-search-input (s)
   "Parse search input S into tags, folders, excluded-tags, and text components.
 Returns plist with :tags :excluded-tags :folders :text keys.
-Supports '#tag' for inclusion, '-#tag' for exclusion."
+Supports '#tag', '#\"spaced tag\"', '-#tag', '-#\"spaced tag\"' for tags."
   (let* ((s (or s ""))
-         (tokens (split-string s "[ \t]+" t))
          (tags '())
          (excluded-tags '())
          (folders '())
          (texts '())
-         (tag-re (rx string-start "#" (group (+ (any alnum ?- ?_ ?+ ?.))) string-end))
-         (excluded-tag-re (rx string-start "-#" (group (+ (any alnum ?- ?_ ?+ ?.))) string-end))
-         (folder-re (rx string-start "[" (group (*? (not (any "]")))) "]" string-end)))
-    (dolist (tok tokens)
-      (cond
-       ((string-match excluded-tag-re tok) (push (downcase (match-string 1 tok)) excluded-tags))
-       ((string-match tag-re tok) (push (downcase (match-string 1 tok)) tags))
-       ((string-match folder-re tok) (push (match-string 1 tok) folders))
-       (t (push tok texts))))
+         (pos 0)
+         (len (length s)))
+    ;; Parse character by character to handle quoted tags
+    (while (< pos len)
+      (let ((char (aref s pos)))
+        (cond
+         ;; Skip whitespace
+         ((memq char '(?\s ?\t))
+          (setq pos (1+ pos)))
+         
+         ;; Handle excluded tags (-#tag or -#"quoted tag")
+         ((and (< pos (- len 2)) (string= (substring s pos (+ pos 2)) "-#"))
+          (setq pos (+ pos 2))
+          (if (and (< pos len) (= (aref s pos) ?\"))
+              ;; Quoted excluded tag: -#"tag with spaces"
+              (let ((start (1+ pos))
+                    (end (string-match "\"" s (1+ pos))))
+                (if end
+                    (progn
+                      (push (substring s start end) excluded-tags)
+                      (setq pos (1+ end)))
+                  ;; No closing quote, treat as regular text
+                  (push (substring s (- pos 2) (1+ pos)) texts)
+                  (setq pos (1+ pos))))
+            ;; Regular excluded tag: -#tag
+            (let ((start pos)
+                  (end pos))
+              (while (and (< end len) 
+                         (not (memq (aref s end) '(?\s ?\t))))
+                (setq end (1+ end)))
+              (when (> end start)
+                (push (substring s start end) excluded-tags))
+              (setq pos end))))
+         
+         ;; Handle tags (#tag or #"quoted tag")
+         ((and (< pos len) (= (aref s pos) ?#))
+          (setq pos (1+ pos))
+          (if (and (< pos len) (= (aref s pos) ?\"))
+              ;; Quoted tag: #"tag with spaces"
+              (let ((start (1+ pos))
+                    (end (string-match "\"" s (1+ pos))))
+                (if end
+                    (progn
+                      (push (substring s start end) tags)
+                      (setq pos (1+ end)))
+                  ;; No closing quote, treat as regular text
+                  (push (substring s (1- pos) (1+ pos)) texts)
+                  (setq pos (1+ pos))))
+            ;; Regular tag: #tag
+            (let ((start pos)
+                  (end pos))
+              (while (and (< end len) 
+                         (not (memq (aref s end) '(?\s ?\t)))
+                         (string-match-p "[a-zA-Z0-9_+-.]" (char-to-string (aref s end))))
+                (setq end (1+ end)))
+              (when (> end start)
+                (push (substring s start end) tags))
+              (setq pos end))))
+         
+         ;; Handle folders [folder name]
+         ((and (< pos len) (= (aref s pos) ?\[))
+          (let ((end (string-match "]" s pos)))
+            (if end
+                (progn
+                  (push (substring s (1+ pos) end) folders)
+                  (setq pos (1+ end)))
+              ;; No closing bracket, treat as text
+              (let ((start pos)
+                    (end pos))
+                (while (and (< end len) 
+                           (not (memq (aref s end) '(?\s ?\t))))
+                  (setq end (1+ end)))
+                (push (substring s start end) texts)
+                (setq pos end)))))
+         
+         ;; Regular text
+         (t
+          (let ((start pos)
+                (end pos))
+            (while (and (< end len) 
+                       (not (memq (aref s end) '(?\s ?\t))))
+              (setq end (1+ end)))
+            (push (substring s start end) texts)
+            (setq pos end))))))
+    
     (list :tags (nreverse tags)
           :excluded-tags (nreverse excluded-tags)
           :folders (nreverse folders)
@@ -536,7 +611,7 @@ According to Raindrop API, you can exclude tags using '-tag'."
 (defun raindrop-fetch (&rest plist)
   "Fetch raindrops according to PLIST keys:
 :tags (list or string), :excluded-tags (list or string), :folders (list/string) or :folder (string),
-:collection (number or 0 for all), :limit (int), :sort (symbol), :match ('all|'any).
+:search (string), :collection (number or 0 for all), :limit (int), :sort (symbol), :match ('all|'any).
 Returns list of normalized items."
   (when raindrop-debug
     (raindrop--debug "fetch %S" plist))
@@ -544,12 +619,15 @@ Returns list of normalized items."
          (excluded-tags (plist-get plist :excluded-tags))
          (folders (or (plist-get plist :folders)
                       (let ((f (plist-get plist :folder))) (and f (list f)))))
+         (search-text (plist-get plist :search))
          (limit (or (plist-get plist :limit) raindrop-default-limit))
          (input (string-join 
                  (append 
-                  (mapcar (lambda (tag) (concat "#" tag)) (or tags '()))
-                  (mapcar (lambda (tag) (concat "-#" tag)) (or excluded-tags '()))
-                  (mapcar (lambda (folder) (concat "[" folder "]")) (or folders '())))
+                  (mapcar (lambda (tag) (raindrop--quote-tag tag)) (or tags '()))
+                  (mapcar (lambda (tag) (concat "-" (raindrop--quote-tag tag))) (or excluded-tags '()))
+                  (mapcar (lambda (folder) (concat "[" folder "]")) (or folders '()))
+                  (when (and search-text (not (string-empty-p (string-trim search-text))))
+                    (list (string-trim search-text))))
                  " ")))
     (when raindrop-debug
       (raindrop--debug "fetch input=%S limit=%S" input limit))
@@ -565,12 +643,15 @@ Returns list of normalized items."
          (excluded-tags (plist-get plist :excluded-tags))
          (folders (or (plist-get plist :folders)
                       (let ((f (plist-get plist :folder))) (and f (list f)))))
+         (search-text (plist-get plist :search))
          (limit (or (plist-get plist :limit) raindrop-default-limit))
          (input (string-join 
                  (append 
                   (mapcar (lambda (tag) (concat "#" tag)) (or tags '()))
                   (mapcar (lambda (tag) (concat "-#" tag)) (or excluded-tags '()))
-                  (mapcar (lambda (folder) (concat "[" folder "]")) (or folders '())))
+                  (mapcar (lambda (folder) (concat "[" folder "]")) (or folders '()))
+                  (when (and search-text (not (string-empty-p (string-trim search-text))))
+                    (list (string-trim search-text))))
                  " ")))
     (when raindrop-debug
       (raindrop--debug "fetch-async input=%S limit=%S" input limit))

@@ -142,23 +142,23 @@ Each item is a plist/alist with keys :link, :title, :excerpt, :tags."
 
 
 (defun raindrop-org--parse-tags-string (tags-string)
-  "Parse TAGS-STRING with comma or space separation into tags and excluded tags.
-Examples:
-  \"cli,-openai,emacs\" -> (:tags (\"cli\" \"emacs\") :excluded-tags (\"openai\"))
-  \"cli -openai emacs\" -> (:tags (\"cli\" \"emacs\") :excluded-tags (\"openai\"))
-  \"cli, -openai, emacs\" -> (:tags (\"cli\" \"emacs\") :excluded-tags (\"openai\"))"
+  "Parse TAGS-STRING with comma separation into tags and excluded tags.
+For comma-separated format: \"cli, -openai, emacs\" -> (:tags (\"cli\" \"emacs\") :excluded-tags (\"openai\"))
+For single tag with spaces: \"disk usage\" -> (:tags (\"disk usage\") :excluded-tags nil)
+For exclusion: \"-disk usage\" -> (:tags nil :excluded-tags (\"disk usage\"))"
   (when (and tags-string (not (string-empty-p tags-string)))
     (let* ((tags '())
            (excluded-tags '())
-           ;; Split by comma first, then by spaces if no commas
+           ;; Only split by comma, preserve spaces within tags
            (parts (if (string-match-p "," tags-string)
                       (mapcar #'string-trim (split-string tags-string ","))
-                    (split-string tags-string)))
+                    ;; For single tag/value, treat as one item
+                    (list (string-trim tags-string))))
            ;; Process each part
            (processed (dolist (part parts)
                         (when (and part (not (string-empty-p part)))
                           (if (string-prefix-p "-" part)
-                              (push (substring part 1) excluded-tags)
+                              (push (string-trim (substring part 1)) excluded-tags)
                             (push part tags))))))
       (list :tags (nreverse tags)
             :excluded-tags (nreverse excluded-tags)))))
@@ -378,11 +378,21 @@ Return plist with :block-beg, :subtree-end and :region."
         (puthash tg (1+ (gethash tg h 0)) h)))
     h))
 
-(defun raindrop-org--eligible-tags (freqs)
-  "Return a list of heading tags from FREQS filtered and sorted by frequency."
+(defun raindrop-org--eligible-tags (freqs &optional exclude-tags exclude-groups)
+  "Return a list of heading tags from FREQS filtered and sorted by frequency.
+EXCLUDE-TAGS is a list of search tags to exclude from heading selection.
+EXCLUDE-GROUPS is a list of user-specified tags to exclude from grouping."
   (let* ((stop (let ((s (make-hash-table :test 'equal)))
                  (dolist (stop-tag raindrop-org-smart-stop-tags)
                    (puthash (raindrop-org--norm-tag stop-tag) t s))
+                 ;; Add excluded search tags to stop list
+                 (when exclude-tags
+                   (dolist (ex-tag exclude-tags)
+                     (puthash (raindrop-org--norm-tag ex-tag) t s)))
+                 ;; Add user-specified exclude groups to stop list  
+                 (when exclude-groups
+                   (dolist (ex-group exclude-groups)
+                     (puthash (raindrop-org--norm-tag ex-group) t s)))
                  s))
          (all '()))
     (maphash
@@ -419,10 +429,12 @@ Return plist with :block-beg, :subtree-end and :region."
       (concat (upcase (substring s 0 1)) (substring s 1))
     s))
 
-(defun raindrop-org--group-items-auto (items)
-  "Return an alist of (Heading . items) using frequency-based auto-grouping."
+(defun raindrop-org--group-items-auto (items &optional exclude-tags exclude-groups)
+  "Return an alist of (Heading . items) using frequency-based auto-grouping.
+EXCLUDE-TAGS is a list of search tags to exclude from heading selection.
+EXCLUDE-GROUPS is a list of user-specified tags to exclude from grouping."
   (let* ((freqs (raindrop-org--tag-frequencies items))
-         (selected (raindrop-org--eligible-tags freqs))
+         (selected (raindrop-org--eligible-tags freqs exclude-tags exclude-groups))
          (table (make-hash-table :test 'equal)))
     (dolist (tag selected) (puthash tag '() table))
     (puthash "Other" '() table)
@@ -455,12 +467,14 @@ Return plist with :block-beg, :subtree-end and :region."
 (defun org-dblock-write:raindrop (params)
   "Writer for the \"raindrop\" dynamic block using PARAMS.
 Supported formats:
-  :tags \"cli,-openai,emacs\"  - comma-separated tags with exclusions
-  :folders \"work,personal\"    - comma-separated folders
-  :match all/any               - matching mode
-  :limit 20                    - number limit
-  :collection 0                - collection ID
-  :smart t                     - enable smart grouping"
+  :tags \"cli,-openai,emacs\"    - comma-separated tags with exclusions
+  :folders \"work,personal\"      - comma-separated folders
+  :search \"query text\"          - text search query
+  :exclude-groups \"cli,terminal\" - tags to exclude from smart grouping
+  :match all/any                 - matching mode
+  :limit 20                      - number limit
+  :collection 0                  - collection ID
+  :smart t                       - enable smart grouping"
   (raindrop-org--debug "dblock params=%S" params)
   
   (let* ((tags-raw (plist-get params :tags))
@@ -487,6 +501,19 @@ Supported formats:
                           (t nil)))
          (folders (raindrop-org--parse-folders-string folders-string))
          
+         ;; Parse search text
+         (search-text (plist-get params :search))
+         
+         ;; Parse exclude-groups
+         (exclude-groups-raw (plist-get params :exclude-groups))
+         (exclude-groups-string (cond
+                                 ((stringp exclude-groups-raw) exclude-groups-raw)
+                                 ((listp exclude-groups-raw)
+                                  (mapconcat (lambda (x) (format "%s" x)) exclude-groups-raw ","))
+                                 ((symbolp exclude-groups-raw) (symbol-name exclude-groups-raw))
+                                 (t nil)))
+         (exclude-groups (raindrop-org--parse-folders-string exclude-groups-string))
+         
          ;; Other parameters - FIX: wrap default value in quotes
          (match (raindrop-org--normalize-match 
                  (or (plist-get params :match) 'all)))
@@ -503,7 +530,7 @@ Supported formats:
                          tags excluded-tags folders)
     
     ;; Fetch items
-    (let* ((items (if (or tags excluded-tags folders)
+    (let* ((items (if (or tags excluded-tags folders search-text)
                       (condition-case err
                           (let ((fetch-args (append 
                                              (list :match match 
@@ -514,7 +541,9 @@ Supported formats:
                                              (when excluded-tags 
                                                (list :excluded-tags excluded-tags))
                                              (when folders 
-                                               (list :folders folders)))))
+                                               (list :folders folders))
+                                             (when (and search-text (not (string-empty-p (string-trim search-text))))
+                                               (list :search search-text)))))
                             (raindrop-org--debug "fetch-args=%S" fetch-args)
                             (apply #'raindrop-fetch fetch-args))
                         (error 
@@ -529,7 +558,7 @@ Supported formats:
               raindrop-links-empty-text)
              (smart-flag
               (raindrop-org--render-grouped 
-               (raindrop-org--group-items-auto items)))
+               (raindrop-org--group-items-auto items tags exclude-groups)))
              (t 
               (raindrop-render-org-list items)))))
       

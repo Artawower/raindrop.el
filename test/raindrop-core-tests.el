@@ -644,10 +644,15 @@
     (should (equal (plist-get result :tags) '("cli")))
     (should (equal (plist-get result :excluded-tags) '("openai" "tui with space"))))
   
-  ;; Test space-separated format
-  (let ((result (raindrop-org--parse-tags-string "cli -openai macos")))
-    (should (equal (plist-get result :tags) '("cli" "macos")))
-    (should (equal (plist-get result :excluded-tags) '("openai")))))
+  ;; Test single tag with spaces
+  (let ((result (raindrop-org--parse-tags-string "disk usage")))
+    (should (equal (plist-get result :tags) '("disk usage")))
+    (should (equal (plist-get result :excluded-tags) nil)))
+  
+  ;; Test single excluded tag with spaces
+  (let ((result (raindrop-org--parse-tags-string "-disk usage")))
+    (should (equal (plist-get result :tags) nil))
+    (should (equal (plist-get result :excluded-tags) '("disk usage")))))
 
 (ert-deftest raindrop-org-dblock-new-implementation ()
   "Test that new dblock implementation correctly parses parameters."
@@ -664,6 +669,143 @@
         (org-dblock-write:raindrop '(:tags "cli, -openai, -tui with space" :match all :limit 5))
         (should (equal parsed-tags '("cli")))
         (should (equal parsed-excluded-tags '("openai" "tui with space")))))))
+
+(ert-deftest raindrop-search-input-parsing-quoted-tags ()
+  "Test parsing search input with quoted tags containing spaces."
+  ;; Test quoted tag with text
+  (let ((result (raindrop--parse-search-input "#\"disk usage\" backup tools")))
+    (should (equal (plist-get result :tags) '("disk usage")))
+    (should (equal (plist-get result :text) "backup tools")))
+  
+  ;; Test multiple quoted and regular tags
+  (let ((result (raindrop--parse-search-input "#emacs #\"file manager\" -#\"old tool\" config")))
+    (should (equal (plist-get result :tags) '("emacs" "file manager")))
+    (should (equal (plist-get result :excluded-tags) '("old tool")))
+    (should (equal (plist-get result :text) "config")))
+  
+  ;; Test quoted excluded tag
+  (let ((result (raindrop--parse-search-input "-#\"system admin\" scripts")))
+    (should (equal (plist-get result :tags) nil))
+    (should (equal (plist-get result :excluded-tags) '("system admin")))
+    (should (equal (plist-get result :text) "scripts")))
+  
+  ;; Test mixed quoted and unquoted
+  (let ((result (raindrop--parse-search-input "#cli #\"disk usage\" -#outdated tools")))
+    (should (equal (plist-get result :tags) '("cli" "disk usage")))
+    (should (equal (plist-get result :excluded-tags) '("outdated")))
+    (should (equal (plist-get result :text) "tools"))))
+
+(ert-deftest raindrop-fetch-with-search-parameter ()
+  "Test that raindrop-fetch handles :search parameter correctly."
+  (let (captured-input)
+    (cl-letf (((symbol-function 'raindrop-search-bookmarks)
+               (lambda (input callback limit)
+                 (setq captured-input input)
+                 '((link . "https://example.com") (title . "Test Result")))))
+      ;; Test search only
+      (raindrop-fetch :search "machine learning")
+      (should (string= captured-input "machine learning"))
+      
+      ;; Test search with tags
+      (raindrop-fetch :search "AI research" :tags '("python"))
+      (should (string-match-p "#python" captured-input))
+      (should (string-match-p "AI research" captured-input))
+      
+      ;; Test empty search is ignored
+      (raindrop-fetch :search "" :tags '("test"))
+      (should (string= captured-input "#test"))
+      
+      ;; Test whitespace-only search is ignored
+      (raindrop-fetch :search "   " :tags '("test"))
+      (should (string= captured-input "#test")))))
+
+(ert-deftest raindrop-dblock-with-search-parameter ()
+  "Test that dynamic blocks handle :search parameter."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'raindrop-fetch)
+               (lambda (&rest args)
+                 (let ((search (plist-get args :search)))
+                   (if (and search (string= search "test query"))
+                       (list (list :link "https://test.com" :title "Test" :excerpt "Found"))
+                     nil)))))
+      ;; Test with search parameter
+      (org-dblock-write:raindrop '(:search "test query" :limit 5))
+      (goto-char (point-min))
+      (should (search-forward "[[https://test.com][Test]]" nil t)))))
+
+(ert-deftest raindrop-ob-with-search-parameter ()
+  "Test that org-babel blocks handle :search parameter."
+  (cl-letf (((symbol-function 'raindrop-fetch)
+             (lambda (&rest args)
+               (let ((search (plist-get args :search)))
+                 (if (and search (string= search "babel test"))
+                     (list (list :link "https://babel.com" :title "Babel Test" :excerpt "Success"))
+                   nil)))))
+    (let* ((params '((:search . "babel test") (:limit . 10)))
+           (result (org-babel-execute:raindrop nil params)))
+      (should (string-match-p "\\[\\[https://babel.com\\]\\[Babel Test\\]\\]" result)))))
+
+(ert-deftest raindrop-smart-grouping-excludes-search-tags ()
+  "Test that smart grouping excludes search tags from heading selection."
+  (let* ((items '(((link . "https://a.com") (title . "A") (tags . ("emacs" "package")))
+                  ((link . "https://b.com") (title . "B") (tags . ("emacs" "config")))
+                  ((link . "https://c.com") (title . "C") (tags . ("vim" "config")))))
+         (grouped (raindrop-org--group-items-auto items '("emacs"))))
+    ;; "emacs" should not appear as a heading since it was excluded
+    (should-not (assoc "Emacs" grouped))
+    ;; Other tags should still be used for grouping
+    (should (or (assoc "Package" grouped) (assoc "Config" grouped) (assoc "Other" grouped)))))
+
+(ert-deftest raindrop-dblock-smart-excludes-search-tags ()
+  "Test that dynamic block smart grouping excludes search tags."
+  (with-temp-buffer
+    (let* ((test-items '(((link . "https://test1.com") (title . "Test 1") (tags . ("emacs" "package")))
+                         ((link . "https://test2.com") (title . "Test 2") (tags . ("emacs" "config")))))
+           (captured-exclude-tags nil))
+      (cl-letf (((symbol-function 'raindrop-fetch)
+                 (lambda (&rest args) test-items))
+                ((symbol-function 'raindrop-org--group-items-auto)
+                 (lambda (items exclude-tags exclude-groups)
+                   (setq captured-exclude-tags exclude-tags)
+                   `(("Other" . ,items))))
+                ((symbol-function 'raindrop-org--render-grouped)
+                 (lambda (grouped) "- Test content")))
+        (org-dblock-write:raindrop '(:tags "emacs" :smart t :limit 5))
+        ;; Verify that "emacs" was passed as excluded tag
+        (should (member "emacs" captured-exclude-tags))))))
+
+(ert-deftest raindrop-exclude-groups-functionality ()
+  "Test that :exclude-groups parameter works correctly."
+  (let* ((items '(((link . "https://a.com") (title . "A") (tags . ("emacs" "cli" "package")))
+                  ((link . "https://b.com") (title . "B") (tags . ("emacs" "cli" "config")))
+                  ((link . "https://c.com") (title . "C") (tags . ("vim" "cli" "editor")))))
+         ;; Exclude "cli" from grouping - it should not appear as a heading
+         (grouped (raindrop-org--group-items-auto items '("emacs") '("cli"))))
+    ;; "cli" should not appear as a heading since it was excluded
+    (should-not (assoc "Cli" grouped))
+    ;; "emacs" should not appear as a heading since it was in exclude-tags
+    (should-not (assoc "Emacs" grouped))
+    ;; Other tags should still be used for grouping
+    (should (or (assoc "Package" grouped) (assoc "Config" grouped) (assoc "Editor" grouped) (assoc "Other" grouped)))))
+
+(ert-deftest raindrop-dblock-with-exclude-groups ()
+  "Test that dynamic blocks handle :exclude-groups parameter."
+  (with-temp-buffer
+    (let* ((test-items '(((link . "https://test1.com") (title . "Test 1") (tags . ("emacs" "cli" "package")))
+                         ((link . "https://test2.com") (title . "Test 2") (tags . ("emacs" "cli" "config")))))
+           (captured-exclude-groups nil))
+      (cl-letf (((symbol-function 'raindrop-fetch)
+                 (lambda (&rest args) test-items))
+                ((symbol-function 'raindrop-org--group-items-auto)
+                 (lambda (items exclude-tags exclude-groups)
+                   (setq captured-exclude-groups exclude-groups)
+                   `(("Other" . ,items))))
+                ((symbol-function 'raindrop-org--render-grouped)
+                 (lambda (grouped) "- Test content")))
+        (org-dblock-write:raindrop '(:tags "emacs" :exclude-groups "cli,terminal" :smart t :limit 5))
+        ;; Verify that exclude-groups were parsed and passed correctly
+        (should (member "cli" captured-exclude-groups))
+        (should (member "terminal" captured-exclude-groups))))))
 
 
 ;;; raindrop-core-tests.el ends here

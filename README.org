@@ -115,7 +115,9 @@ Load packages (autoloads are simple; explicit require is fine):
 ** Interactive Search Interface
 Use =M-x raindrop-search= for an interactive search with as-you-type completion:
 - Search by tags: =#emacs #lisp some text=
+- Tags with spaces: =#\"disk usage\" #\"file manager\" backup tools=
 - Exclude tags: =#emacs -#outdated= (include emacs, exclude outdated)  
+- Exclude spaced tags: =#cli -#\"old tool\" modern tools=
 - Mixed search: =#programming -#legacy [Work] project=
 - Search by folders: =[Work] project notes=
 - Combined search: =#important [Archive] meeting notes=
@@ -133,6 +135,8 @@ Embark Actions (when using Embark):
 - =O=: Open in Raindrop app
 - =e=: Edit bookmark in dedicated buffer
 - =D=: Delete bookmark (with confirmation)
+- =c=: Create new bookmark (from clipboard/browser)
+- =C=: Create bookmark from URL in kill ring
 
 Customization:
 - =raindrop-search-idle-delay=: delay before API request (default 0.25s)
@@ -140,6 +144,21 @@ Customization:
 - =raindrop-search-spinner-frames=: spinner animation frames
 - =raindrop-search-spinner-delay=: spinner animation speed
 - =raindrop-search-title-max= / =raindrop-search-excerpt-max=: truncation limits
+
+** Creating Bookmarks
+Create new bookmarks directly from Emacs using these functions:
+
+- =M-x raindrop-search-create-bookmark=: Create bookmark from any URL
+- =M-x raindrop-search-create-from-browser=: Create from clipboard (browser URL)
+- =M-x raindrop-search-create-from-kill-ring=: Create from URL in kill ring
+
+All creation functions open an edit buffer where you can:
+- Set the title and description
+- Add tags (comma-separated: =emacs, productivity, tools=)
+- Customize before saving with =C-c C-c=
+- Cancel with =C-c C-k=
+
+The edit buffer automatically detects URLs at point or in clipboard for quick bookmarking.
 
 ** Insert/Update links under a heading (tags AND)
 Add tags to a heading, e.g.:
@@ -175,6 +194,8 @@ Parameters:
   Tags with spaces work naturally: ="cli, -openai, -tui with space"=.
 - =:folders= string with comma-separated folder names (e.g., ="work, personal"=).
 - =:folder= alias for =:folders= that accepts a single folder name.
+- =:search= string for text search query (e.g., ="machine learning"=).
+- =:exclude-groups= string with comma-separated tags to exclude from smart grouping (e.g., ="cli, terminal"=).
 - =:match= =all= (AND, default) or =any= (OR).
 - =:collection= numeric collection id (optional, =0= means all). If both
   =:folders= and =:collection= are provided, the folder names are resolved to
@@ -203,6 +224,21 @@ Examples:
   #+BEGIN: raindrop :tags "cli, -openai, -tui with space" :match all :output org-list :smart t
   #+END:
   #+END_EXAMPLE
+- Text search with tags:
+  #+BEGIN_EXAMPLE
+  #+BEGIN: raindrop :search "machine learning" :tags "python, ai" :match any :limit 20
+  #+END:
+  #+END_EXAMPLE
+- Text search only:
+  #+BEGIN_EXAMPLE
+  #+BEGIN: raindrop :search "productivity tools" :limit 15 :smart t
+  #+END:
+  #+END_EXAMPLE
+- Smart grouping with excluded groups:
+  #+BEGIN_EXAMPLE
+  #+BEGIN: raindrop :tags "emacs" :exclude-groups "cli, terminal" :smart t :limit 20
+  #+END:
+  #+END_EXAMPLE
 
 ** Org-babel block
 Returns Org-formatted output; use =:results raw replace=:
@@ -219,6 +255,14 @@ With tag exclusion and tags with spaces:
 
 Space-separated format also supported:
 #+BEGIN_SRC raindrop :tags "cli -openai macos" :match all :limit 15 :results raw replace
+#+END_SRC
+
+With text search:
+#+BEGIN_SRC raindrop :search "productivity" :tags "emacs" :match any :limit 10 :results raw replace
+#+END_SRC
+
+Text search only:
+#+BEGIN_SRC raindrop :search "artificial intelligence" :limit 20 :results raw replace
 #+END_SRC
 
 You can also enable via babel languages API:

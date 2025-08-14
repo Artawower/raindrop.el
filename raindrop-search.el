@@ -296,8 +296,8 @@ URL string."
          (text (plist-get parsed :text))
          (input (string-join
                  (append
-                  (mapcar (lambda (tag) (concat "#" tag)) tags)
-                  (mapcar (lambda (tag) (concat "-#" tag)) excluded-tags)
+                  (mapcar (lambda (tag) (raindrop--quote-tag tag)) tags)
+                  (mapcar (lambda (tag) (concat "-" (raindrop--quote-tag tag))) excluded-tags)
                   (mapcar (lambda (folder) (concat "[" folder "]")) folders)
                   (and text (not (string-empty-p text)) (list text)))
                  " ")))
@@ -527,13 +527,13 @@ app URL for the item."
   (save-excursion
     (goto-char (point-min))
     (let (title link tags excerpt)
-      (when (re-search-forward "^Title:\\s-*\KATEX_INLINE_OPEN.*\KATEX_INLINE_CLOSE$" nil t)
+      (when (re-search-forward "^Title:\\s-*\\(.*\\)$" nil t)
         (setq title (string-trim (substring-no-properties (match-string 1)))))
       (goto-char (point-min))
-      (when (re-search-forward "^Link:\\s-*\KATEX_INLINE_OPEN.*\KATEX_INLINE_CLOSE$" nil t)
+      (when (re-search-forward "^Link:\\s-*\\(.*\\)$" nil t)
         (setq link (string-trim (substring-no-properties (match-string 1)))))
       (goto-char (point-min))
-      (when (re-search-forward "^Tags:\\s-*\KATEX_INLINE_OPEN.*\KATEX_INLINE_CLOSE$" nil t)
+      (when (re-search-forward "^Tags:\\s-*\\(.*\\)$" nil t)
         (let* ((raw (substring-no-properties (match-string 1)))
                (parts (split-string raw "\\s-*,\\s-*" t))
                (norm (mapcar (lambda (s)
@@ -608,12 +608,25 @@ app URL for the item."
 (defun raindrop-search-edit-save ()
   "Save changes from the current Raindrop edit buffer back to Raindrop."
   (interactive)
-  (unless (bound-and-true-p raindrop-search--edit-item-id)
-    (user-error "Not a raindrop edit buffer"))
-  (let ((id raindrop-search--edit-item-id))
-    (if (or (null id) (not (integerp id)))
-        (user-error "No valid item ID available for saving")
-      (let* ((payload (raindrop-search--parse-edit-buffer)))
+  (let* ((id raindrop-search--edit-item-id)
+         (payload (raindrop-search--parse-edit-buffer))
+         (is-creation (null id)))
+    (if is-creation
+        ;; Create new bookmark
+        (progn
+          ;; Ensure link is present for creation
+          (unless (alist-get 'link payload)
+            (user-error "Link is required for creating a bookmark"))
+          (raindrop-api-request-async
+           "/raindrop" 'POST nil payload
+           (lambda (res err)
+             (if err 
+                 (message "Create failed: %s" err)
+               (message "Bookmark created successfully")
+               (quit-window t (selected-window))))))
+      ;; Update existing bookmark
+      (if (not (integerp id))
+          (user-error "No valid item ID available for saving")
         (raindrop-api-request-async
          (format "/raindrop/%d" id) 'PUT nil payload
          (lambda (_res err)
@@ -627,6 +640,91 @@ app URL for the item."
   (interactive)
   (quit-window t (selected-window)))
 
+;;;###autoload
+(defun raindrop-search-create-bookmark (url &optional title collection)
+  "Create a new bookmark with URL.
+Optionally specify TITLE and COLLECTION.
+Opens edit buffer for further customization."
+  (interactive 
+   (let ((url (read-string "URL: "
+                          (or (thing-at-point 'url)
+                              (when (fboundp 'browse-url-url-at-point)
+                                (browse-url-url-at-point))
+                              ""))))
+     (list url)))
+  (unless (string-match-p "^https?://" url)
+    (user-error "Invalid URL: %s" url))
+  (let ((new-item `((title . ,(or title ""))
+                    (link . ,url)
+                    (tags . ())
+                    (excerpt . "")
+                    (collection . ,(when collection `((id . ,collection)))))))
+    (raindrop-search--open-create-buffer new-item)))
+
+(defun raindrop-search--open-create-buffer (item)
+  "Open create buffer for new ITEM."
+  (let* ((buf (get-buffer-create "*Raindrop Create*"))
+         (title (or (raindrop-search--kv item :title)
+                    (raindrop-search--kv item 'title) ""))
+         (link  (or (raindrop-search--kv item :link)
+                    (raindrop-search--kv item 'link) ""))
+         (tags  (raindrop-search--tags->strings
+                 (or (raindrop-search--kv item :tags)
+                     (raindrop-search--kv item 'tags))))
+         (excerpt (or (raindrop-search--kv item :excerpt)
+                      (raindrop-search--kv item 'excerpt) "")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize "# Create new Raindrop bookmark. Press C-c C-c to save, C-c C-k to cancel."
+                            'face 'raindrop-search-edit-header))
+        (insert "\n\n")
+        (raindrop-search--insert-ro-key "Title: ")
+        (insert (format "%s\n" title))
+        (raindrop-search--insert-ro-key "Link: ")
+        (insert (format "%s\n" link))
+        (raindrop-search--insert-ro-key "Tags: ")
+        (insert (mapconcat (lambda (tag)
+                             (if (string-match-p "[ ,\"]" tag)
+                                 (format "\"%s\"" tag) tag))
+                           tags ", "))
+        (insert "\n")
+        (raindrop-search--insert-ro-key "Excerpt:")
+        (insert "\n")
+        (insert excerpt))
+      (goto-char (point-min))
+      (raindrop-search-edit-mode)
+      (setq raindrop-search--edit-item-id nil)) ; nil indicates creation mode
+    (pop-to-buffer buf)
+    (and-let* ((win (get-buffer-window buf)))
+      (select-window win))
+    (goto-char (point-min))
+    (re-search-forward "^Title:\\s-*" nil t)
+    (when (and (active-minibuffer-window)
+               (minibufferp (window-buffer (active-minibuffer-window))))
+      (run-at-time 0 nil (lambda ()
+                           (when (and (minibufferp)
+                                      (fboundp 'abort-recursive-edit))
+                             (abort-recursive-edit)))))
+    buf))
+
+;;;###autoload
+(defun raindrop-search-create-from-browser ()
+  "Create a bookmark from the current browser tab (requires browser extension or external tool)."
+  (interactive)
+  (let ((url (read-string "URL (from clipboard or browser): " 
+                          (or (current-kill 0 t)
+                              ""))))
+    (raindrop-search-create-bookmark url)))
+
+;;;###autoload  
+(defun raindrop-search-create-from-kill-ring ()
+  "Create a bookmark from URL in kill ring."
+  (interactive)
+  (let ((url (current-kill 0 t)))
+    (when (and url (string-match-p "^https?://" url))
+      (raindrop-search-create-bookmark url))))
+
 (with-eval-after-load 'embark
   (defvar embark-keymap-alist)
   (defvar raindrop-search-embark-map
@@ -635,6 +733,8 @@ app URL for the item."
       (define-key m (kbd "O") #'raindrop-search-embark-open-raindrop)
       (define-key m (kbd "e") #'raindrop-search-embark-edit)
       (define-key m (kbd "D") #'raindrop-search-embark-delete)
+      (define-key m (kbd "c") #'raindrop-search-create-from-browser)
+      (define-key m (kbd "C") #'raindrop-search-create-from-kill-ring)
       m)
     "Embark keymap for `raindrop' completion category.")
   (add-to-list 'embark-keymap-alist '(raindrop . raindrop-search-embark-map)))
