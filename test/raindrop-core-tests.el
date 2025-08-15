@@ -807,5 +807,74 @@
         (should (member "cli" captured-exclude-groups))
         (should (member "terminal" captured-exclude-groups))))))
 
+(ert-deftest raindrop-context-aware-heading-levels ()
+  "Test that smart grouping uses context-aware heading levels."
+  (let ((temp-file (make-temp-file "test-raindrop" nil ".org")))
+    (unwind-protect
+        (with-current-buffer (find-file-noselect temp-file)
+          (org-mode)
+          
+          ;; Test: No parent heading - should use level 1 (*)
+          (erase-buffer)
+          (insert "Some text\n#+BEGIN: raindrop\n#+END:\n")
+          (goto-char (point-min))
+          (search-forward "#+BEGIN:")
+          (let ((level (raindrop-org--get-context-heading-level)))
+            (should (= level 1)))
+          
+          ;; Test: Under level 1 heading - should use level 2 (**)  
+          (erase-buffer)
+          (insert "* Main Heading\nSome text\n#+BEGIN: raindrop\n#+END:\n")
+          (goto-char (point-min))
+          (search-forward "#+BEGIN:")
+          (let ((level (raindrop-org--get-context-heading-level)))
+            (should (= level 2)))
+          
+          ;; Test: Under level 2 heading - should use level 3 (***)
+          (erase-buffer)
+          (insert "* Main Heading\n** Sub Heading\nSome text\n#+BEGIN: raindrop\n#+END:\n")
+          (goto-char (point-min))
+          (search-forward "#+BEGIN:")
+          (let ((level (raindrop-org--get-context-heading-level)))
+            (should (= level 3))))
+      (when (file-exists-p temp-file)
+        (delete-file temp-file)))))
+
+(ert-deftest raindrop-smart-grouping-respects-context ()
+  "Test that smart grouping output has correct heading levels based on context."
+  (let ((temp-file (make-temp-file "test-raindrop" nil ".org")))
+    (unwind-protect
+        (with-current-buffer (find-file-noselect temp-file)
+          (org-mode)
+          (let* ((test-items '(((link . "https://test1.com") (title . "Test 1") (tags . ("emacs" "package")))
+                               ((link . "https://test2.com") (title . "Test 2") (tags . ("emacs" "config")))))
+                 (grouped-output nil))
+            
+            ;; Test: No parent heading
+            (erase-buffer)
+            (insert "#+BEGIN: raindrop\n#+END:\n")
+            (goto-char (point-min))
+            (search-forward "#+BEGIN:")
+            (cl-letf (((symbol-function 'raindrop-fetch)
+                       (lambda (&rest args) test-items)))
+              (setq grouped-output (raindrop-org--render-grouped 
+                                    (raindrop-org--group-items-auto test-items '("emacs"))))
+              ;; Should start with single * (level 1)
+              (should (string-match-p "^\\* " grouped-output)))
+            
+            ;; Test: Under level 1 heading
+            (erase-buffer)
+            (insert "* Main\n#+BEGIN: raindrop\n#+END:\n")
+            (goto-char (point-min))
+            (search-forward "#+BEGIN:")
+            (cl-letf (((symbol-function 'raindrop-fetch)
+                       (lambda (&rest args) test-items)))
+              (setq grouped-output (raindrop-org--render-grouped 
+                                    (raindrop-org--group-items-auto test-items '("emacs"))))
+              ;; Should start with ** (level 2)
+              (should (string-match-p "^\\*\\* " grouped-output)))))
+      (when (file-exists-p temp-file)
+        (delete-file temp-file)))))
+
 
 ;;; raindrop-core-tests.el ends here

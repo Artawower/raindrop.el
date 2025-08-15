@@ -449,9 +449,26 @@ EXCLUDE-GROUPS is a list of user-specified tags to exclude from grouping."
              selected)
      (list (cons "Other" (nreverse (gethash "Other" table)))))))
 
+(defun raindrop-org--get-context-heading-level ()
+  "Determine appropriate heading level based on current org context.
+Returns the level that group headings should use."
+  (if (and (eq major-mode 'org-mode)
+           (buffer-file-name))  ; Only in actual org files, not temp buffers
+      (save-excursion
+        (let ((current-level 0))
+          ;; Search backwards for the nearest heading
+          (while (and (not (bobp)) (= current-level 0))
+            (forward-line -1)
+            (when (looking-at org-heading-regexp)
+              (setq current-level (org-current-level))))
+          ;; If we found a heading, use next level; otherwise use level 1
+          (if (> current-level 0) (1+ current-level) 1)))
+    ;; Fallback to configured level for tests and non-org contexts
+    raindrop-org-smart-heading-level))
+
 (defun raindrop-org--render-grouped (grouped)
   "Render GROUPED (alist of name . items) as headings and lists."
-  (let* ((lvl (max 1 raindrop-org-smart-heading-level))
+  (let* ((lvl (raindrop-org--get-context-heading-level))
          (stars (make-string lvl ?*)))
     (mapconcat
      (lambda (pair)
