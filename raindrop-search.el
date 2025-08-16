@@ -237,13 +237,18 @@ URL string."
    (t nil)))
 
 (defun raindrop-search--format-candidate (it)
-  "Format IT as a completion candidate string."
-  (let* ((title   (or (raindrop-search--kv it :title)
-                      (raindrop-search--kv it 'title) ""))
-         (excerpt (or (raindrop-search--kv it :excerpt)
-                      (raindrop-search--kv it 'excerpt) ""))
-         (desc*   (raindrop-search--truncate (string-trim (if (string-empty-p excerpt) title excerpt))
-                                             raindrop-search-excerpt-max))
+  "Format IT as a completion candidate string. Title (if any) before excerpt."
+  (let* ((raw-title   (or (raindrop-search--kv it :title)
+                          (raindrop-search--kv it 'title) ""))
+         (raw-excerpt (or (raindrop-search--kv it :excerpt)
+                          (raindrop-search--kv it 'excerpt) ""))
+         (t0 (string-trim (or raw-title "")))
+         (e0 (string-trim (or raw-excerpt "")))
+         (title* (and (not (string-empty-p t0))
+                      (raindrop-search--truncate t0 raindrop-search-title-max)))
+         (desc*  (and (not (string-empty-p e0))
+                      (not (string= e0 t0))
+                      (raindrop-search--truncate e0 raindrop-search-excerpt-max)))
          (link    (or (raindrop-search--kv it :link)
                       (raindrop-search--kv it 'link) ""))
          (domain* (and-let* ((d (raindrop-search--domain-of link it)))
@@ -279,7 +284,7 @@ URL string."
          (collstr (when coll-title
                     (propertize (format "[%s]" coll-title)
                                 'face 'raindrop-search-collection))))
-    (string-join (delq nil (list collstr desc* tagstr domain*)) "  ")))
+    (string-join (delq nil (list collstr title* desc* tagstr domain*)) "  ")))
 
 (defun raindrop-search--apply-results (gen items)
   "Apply ITEMS results if GEN matches current generation."
