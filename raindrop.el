@@ -105,6 +105,15 @@ collection."
 (defvar raindrop--collections-cache nil
   "Cached list of collections as returned by `/collections` (value of 'items).")
 
+(defvar raindrop--tags-cache nil
+  "Cached list of tags as returned by `/tags` (value of 'items).")
+
+(defvar raindrop--tags-loading nil
+  "Flag indicating if tags are currently being loaded.")
+
+(defvar raindrop--tags-ready nil
+  "Flag indicating if tags have been loaded and cached.")
+
 ;;;; Small helpers (pure where possible)
 
 (defun raindrop--debug (fmt &rest args)
@@ -834,6 +843,113 @@ Returns normalized items list (sync) or calls CALLBACK with (items err)."
                    (length normalized) (car normalized))
           normalized)))))
 
+;;;; Tags management
+
+(defun raindrop--fetch-tags (&optional callback)
+  "Fetch all tags from Raindrop API.
+If CALLBACK is provided, performs async request, otherwise sync.
+Returns list of tag objects or calls CALLBACK with (tags err)."
+  (let ((endpoint "/tags"))
+    (if callback
+        (raindrop-api-request-async
+         endpoint 'GET nil nil
+         (lambda (res err)
+           (if err
+               (funcall callback nil err)
+             (let* ((raw (or (alist-get 'items res) '()))
+                    (tags (if (vectorp raw) (append raw nil) raw)))
+               (funcall callback tags nil)))))
+      (let* ((payload (raindrop-api-request endpoint 'GET nil nil))
+             (items-raw (alist-get 'items payload))
+             (tags (if (vectorp items-raw) (append items-raw nil) items-raw)))
+        tags))))
+
+(defun raindrop-force-load-tags (&optional callback)
+  "Force reload all tags from Raindrop API and update cache.
+If CALLBACK is provided, performs async request, otherwise sync.
+Returns list of tags or calls CALLBACK with (tags err)."
+  (interactive)
+  (setq raindrop--tags-ready nil
+        raindrop--tags-cache nil
+        raindrop--tags-loading nil)
+  (when raindrop-debug
+    (raindrop--debug "force loading tags..."))
+  (if callback
+      (progn
+        (setq raindrop--tags-loading t)
+        (raindrop--fetch-tags
+         (lambda (tags err)
+           (setq raindrop--tags-loading nil)
+           (if err
+               (when raindrop-debug
+                 (raindrop--debug "tags load error: %s" err))
+             (setq raindrop--tags-cache tags
+                   raindrop--tags-ready t)
+             (when raindrop-debug
+               (raindrop--debug "loaded %d tags" (length tags))))
+           (funcall callback (or tags '()) err))))
+    (let ((tags (raindrop--fetch-tags)))
+      (setq raindrop--tags-cache tags
+            raindrop--tags-ready t)
+      (when raindrop-debug
+        (raindrop--debug "loaded %d tags" (length tags)))
+      tags)))
+
+(defun raindrop-load-tags (&optional callback)
+  "Load tags from cache or API if not already loaded.
+If CALLBACK is provided, performs async request when needed, otherwise sync.
+Returns list of tags or calls CALLBACK with (tags err)."
+  (cond
+   ((and raindrop--tags-ready raindrop--tags-cache)
+    (when raindrop-debug
+      (raindrop--debug "using cached tags (%d items)" (length raindrop--tags-cache)))
+    (if callback
+        (funcall callback raindrop--tags-cache nil)
+      raindrop--tags-cache))
+   (raindrop--tags-loading
+    (when raindrop-debug
+      (raindrop--debug "tags are loading, returning empty for now"))
+    (if callback
+        (funcall callback '() nil)
+      '()))
+   (t
+    (when raindrop-debug
+      (raindrop--debug "loading tags from API..."))
+    (if callback
+        (progn
+          (setq raindrop--tags-loading t)
+          (raindrop--fetch-tags
+           (lambda (tags err)
+             (setq raindrop--tags-loading nil)
+             (unless err
+               (setq raindrop--tags-cache tags
+                     raindrop--tags-ready t))
+             (funcall callback (or tags '()) err))))
+      (let ((tags (raindrop--fetch-tags)))
+        (setq raindrop--tags-cache tags
+              raindrop--tags-ready t)
+        tags)))))
+
+(defun raindrop-copy-tags ()
+  "Copy all tags to kill ring as a comma-separated string."
+  (interactive)
+  (let* ((tags (raindrop-load-tags))
+         (tag-names (mapcar (lambda (tag) 
+                             (or (alist-get '_id tag)
+                                 (alist-get 'name tag)
+                                 (format "%s" tag)))
+                           tags))
+         (tags-string (string-join tag-names ", ")))
+    (if tag-names
+        (progn
+          (kill-new tags-string)
+          (message "Copied %d tags to kill ring: %s" 
+                   (length tag-names)
+                   (if (> (length tags-string) 80)
+                       (concat (substring tags-string 0 77) "...")
+                     tags-string)))
+      (message "No tags found"))))
+
 ;;;; Collections helpers
 
 (defun raindrop-collections ()
@@ -848,11 +964,14 @@ Useful for discovering valid collection IDs for /raindrops/{id} requests."
 
 ;;;###autoload
 (defun raindrop-clear-cache ()
-  "Clear internal caches (e.g., collections list)."
+  "Clear internal caches (collections and tags)."
   (interactive)
-  (setq raindrop--collections-cache nil)
+  (setq raindrop--collections-cache nil
+        raindrop--tags-cache nil
+        raindrop--tags-ready nil
+        raindrop--tags-loading nil)
   (when raindrop-debug-enable
-    (raindrop--debug "collections cache cleared")))
+    (raindrop--debug "collections and tags cache cleared")))
 
 ;;;; Minimal debug helpers
 
