@@ -256,13 +256,12 @@ URL string."
                       (raindrop-search--truncate e0 raindrop-search-excerpt-max)))
          (link    (or (raindrop-search--kv it :link)
                       (raindrop-search--kv it 'link) ""))
-         (note    (if-let ((note (string-trim
-                                  (or (raindrop-search--kv it :note)
-                                      (raindrop-search--kv it 'note)))))
-                      (and (not (string-empty-p note))
-                           (format "%s %s" (propertize "Note:" 'face 'bold)
-                                   (raindrop-search--truncate note raindrop-search-note-max)))
-                    nil))
+         (note    (when-let ((note (string-trim
+                                    (or (raindrop-search--kv it :note)
+                                        (raindrop-search--kv it 'note)))))
+                    (and (not (string-empty-p note))
+                         (format "%s %s" (propertize "Note:" 'face 'bold)
+                                 (raindrop-search--truncate note raindrop-search-note-max)))))
          (domain* (and-let* ((d (raindrop-search--domain-of link it)))
                     (propertize d 'face 'shadow)))
          (tags    (raindrop-search--tags->strings
