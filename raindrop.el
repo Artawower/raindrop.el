@@ -567,6 +567,7 @@ According to Raindrop API, you can exclude tags using '-tag'."
          (created (alist-get 'created raw))
          (id (alist-get '_id raw))
          (domain (alist-get 'domain raw))
+         (note (alist-get 'note raw))
          (collection (alist-get 'collection raw)))
     (list (cons :id id)
           (cons :link link)
@@ -575,6 +576,7 @@ According to Raindrop API, you can exclude tags using '-tag'."
           (cons :tags tags)
           (cons :domain domain)
           (cons :created created)
+          (cons :note note)
           (cons :collection collection))))
 
 (defun raindrop--normalize-items (items)

@@ -63,6 +63,11 @@
   :type 'integer
   :group 'raindrop-search)
 
+(defcustom raindrop-search-note-max 20
+  "Maximum characters for notes before truncation."
+  :type 'integer
+  :group 'raindrop-search)
+
 (defcustom raindrop-search-excerpt-max 40
   "Maximum characters for excerpts before truncation."
   :type 'integer
@@ -251,6 +256,13 @@ URL string."
                       (raindrop-search--truncate e0 raindrop-search-excerpt-max)))
          (link    (or (raindrop-search--kv it :link)
                       (raindrop-search--kv it 'link) ""))
+         (note    (if-let ((note (string-trim
+                                  (or (raindrop-search--kv it :note)
+                                      (raindrop-search--kv it 'note)))))
+                      (and (not (string-empty-p note))
+                           (format "%s %s" (propertize "Note:" 'face 'bold)
+                                   (raindrop-search--truncate note raindrop-search-note-max)))
+                    nil))
          (domain* (and-let* ((d (raindrop-search--domain-of link it)))
                     (propertize d 'face 'shadow)))
          (tags    (raindrop-search--tags->strings
@@ -284,7 +296,7 @@ URL string."
          (collstr (when coll-title
                     (propertize (format "[%s]" coll-title)
                                 'face 'raindrop-search-collection))))
-    (string-join (delq nil (list collstr title* desc* tagstr domain*)) "  ")))
+    (string-join (delq nil (list collstr title* desc* tagstr domain* note)) "  ")))
 
 (defun raindrop-search--apply-results (gen items)
   "Apply ITEMS results if GEN matches current generation."
