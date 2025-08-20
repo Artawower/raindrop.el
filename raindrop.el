@@ -429,11 +429,12 @@ Supports '#tag', '#\"spaced tag\"', '-#tag', '-#\"spaced tag\"' for tags."
                   (push (substring s (1- pos) (1+ pos)) texts)
                   (setq pos (1+ pos))))
             ;; Regular tag: #tag
+            ;; Allow common punctuation used in Raindrop tags, including '/'
             (let ((start pos)
                   (end pos))
-              (while (and (< end len) 
-                         (not (memq (aref s end) '(?\s ?\t)))
-                         (string-match-p "[a-zA-Z0-9_+-.]" (char-to-string (aref s end))))
+              (while (and (< end len)
+                          (not (memq (aref s end) '(?\s ?\t)))
+                          (string-match-p "[a-zA-Z0-9_+\-./]" (char-to-string (aref s end))))
                 (setq end (1+ end)))
               (when (> end start)
                 (push (substring s start end) tags))
