@@ -23,6 +23,7 @@
 (declare-function raindrop--kv "raindrop" (item key))
 (declare-function raindrop--collection-id-by-title "raindrop" (title))
 (declare-function raindrop--collection-title-by-id "raindrop" (id))
+(declare-function raindrop--collection-path-by-id "raindrop" (id))
 (declare-function raindrop--ensure-collections-async "raindrop" (callback))
 (declare-function raindrop--parse-search-input "raindrop" (input))
 (declare-function raindrop--meaningful-search-input-p "raindrop" (parsed))
@@ -212,6 +213,7 @@ URL string."
 
 (defalias 'raindrop-search--collection-id-by-title 'raindrop--collection-id-by-title)
 (defalias 'raindrop-search--collection-title-by-id 'raindrop--collection-title-by-id)
+(defalias 'raindrop-search--collection-path-by-id 'raindrop--collection-path-by-id)
 
 (defun raindrop-search--ensure-collections ()
   "Ensure collections are loaded, refreshing UI when ready."
@@ -263,24 +265,13 @@ URL string."
          (coll-obj (or (raindrop-search--kv it :collection)
                        (raindrop-search--kv it 'collection)))
          (coll-id  (or (raindrop-search--kv it :collectionId)
-                       (raindrop-search--kv it 'collectionId)
-                       (and (consp coll-obj)
-                            (or (raindrop-search--kv coll-obj 'id)
-                                (raindrop-search--kv coll-obj :id)
-                                (raindrop-search--kv coll-obj '_id)
-                                (raindrop-search--kv coll-obj :_id)
-                                (raindrop-search--kv coll-obj '$id)
-                                (raindrop-search--kv coll-obj :$id)
-                                (raindrop-search--kv coll-obj 'oid)
-                                (raindrop-search--kv coll-obj :oid)))))
+                       (raindrop-search--kv it 'collectionId)))
          (coll-title
-          (or (and (consp coll-obj)
-                   (or (raindrop-search--kv coll-obj :title)
-                       (raindrop-search--kv coll-obj 'title)
-                       (raindrop-search--kv coll-obj :name)
-                       (raindrop-search--kv coll-obj 'name)))
-              (and (integerp coll-id)
-                   (raindrop-search--collection-title-by-id coll-id))))
+          (or (when coll-id
+                (raindrop-search--collection-path-by-id coll-id))
+              (when (consp coll-obj)
+                (or (raindrop-search--kv coll-obj 'title)
+                    (raindrop-search--kv coll-obj 'name)))))
          (collstr (when coll-title
                     (propertize (format "[%s]" coll-title)
                                 'face 'raindrop-search-collection))))

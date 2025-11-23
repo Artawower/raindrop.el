@@ -556,6 +556,14 @@ According to Raindrop API, you can exclude tags using '-tag'."
 
 ;;;; Normalization
 
+(defun raindrop--extract-collection-id (collection)
+  "Extract numeric collection ID from COLLECTION object."
+  (when collection
+    (or (and (numberp collection) collection)
+        (raindrop--kv collection '$id)
+        (raindrop--kv collection '_id)
+        (raindrop--kv collection 'id))))
+
 (defun raindrop--normalize-item (raw)
   "Normalize RAW Raindrop item alist into a simpler alist."
   (let* ((link (alist-get 'link raw))
@@ -566,7 +574,8 @@ According to Raindrop API, you can exclude tags using '-tag'."
          (created (alist-get 'created raw))
          (id (alist-get '_id raw))
          (domain (alist-get 'domain raw))
-         (collection (alist-get 'collection raw)))
+         (collection-raw (alist-get 'collection raw))
+         (collection-id (raindrop--extract-collection-id collection-raw)))
     (list (cons :id id)
           (cons :link link)
           (cons :title title)
@@ -574,7 +583,8 @@ According to Raindrop API, you can exclude tags using '-tag'."
           (cons :tags tags)
           (cons :domain domain)
           (cons :created created)
-          (cons :collection collection))))
+          (cons :collection collection-raw)
+          (cons :collectionId collection-id))))
 
 (defun raindrop--normalize-items (items)
   "Normalize a list of raw ITEMS."
@@ -725,11 +735,23 @@ tags (list of {_id count}), types (list of {_id count})."
 (defvar raindrop--collections-by-id nil
   "Hash table mapping collection IDs to titles.")
 
+(defvar raindrop--collections-by-path nil
+  "Hash table mapping full path (lowercase) to IDs (e.g. \"parent/child\").")
+
+(defvar raindrop--collections-parent nil
+  "Hash table mapping collection ID to parent ID.")
+
+(defvar raindrop--collections-all nil
+  "List of all collections (both root and nested).")
+
 (defvar raindrop--collections-loading nil
   "Flag indicating if collections are currently being loaded.")
 
 (defvar raindrop--collections-ready nil
   "Flag indicating if collections have been loaded and indexed.")
+
+(defvar raindrop--collections-callbacks nil
+  "List of callbacks waiting for collections to load.")
 
 (defun raindrop--kv (item key)
   "Get value from ITEM (alist/plist) using KEY (keyword or symbol)."
@@ -741,10 +763,36 @@ tags (list of {_id count}), types (list of {_id count})."
         (and (consp item) (alist-get k1 item))
         (and (consp item) (alist-get k2 item)))))
 
+(defun raindrop--extract-parent-id (collection)
+  "Extract parent collection ID from COLLECTION."
+  (let ((parent (raindrop--kv collection 'parent)))
+    (when parent
+      (or (raindrop--kv parent '$id)
+          (raindrop--kv parent '_id)
+          (raindrop--kv parent 'id)
+          (and (numberp parent) parent)))))
+
+(defun raindrop--build-collection-path (id by-id by-parent &optional seen)
+  "Build full path for collection ID using BY-ID and BY-PARENT hash tables.
+SEEN is used to prevent infinite loops."
+  (let ((seen (or seen (make-hash-table :test 'eql))))
+    (when (gethash id seen)
+      (error "Circular reference in collections"))
+    (puthash id t seen)
+    (let ((title (gethash id by-id))
+          (parent-id (gethash id by-parent)))
+      (if (and parent-id (gethash parent-id by-id))
+          (concat (raindrop--build-collection-path parent-id by-id by-parent seen)
+                  "/" title)
+        title))))
+
 (defun raindrop--build-collections-index (items)
   "Build index hash tables from collections ITEMS."
   (let ((by-title (make-hash-table :test 'equal))
-        (by-id (make-hash-table :test 'eql)))
+        (by-id (make-hash-table :test 'eql))
+        (by-path (make-hash-table :test 'equal))
+        (by-parent (make-hash-table :test 'eql))
+        (seen-ids (make-hash-table :test 'eql)))
     (dolist (c items)
       (let* ((id (or (raindrop--kv c '_id)
                      (raindrop--kv c :_id)
@@ -753,38 +801,118 @@ tags (list of {_id count}), types (list of {_id count})."
              (title (or (raindrop--kv c 'title)
                         (raindrop--kv c :title)
                         (raindrop--kv c 'name)
-                        (raindrop--kv c :name))))
-        (when (and id title)
+                        (raindrop--kv c :name)))
+             (parent-id (raindrop--extract-parent-id c)))
+        (when (and id title (not (gethash id seen-ids)))
+          (puthash id t seen-ids)
           (puthash (downcase title) id by-title)
-          (puthash id title by-id))))
+          (puthash id title by-id)
+          (when parent-id
+            (puthash id parent-id by-parent)))))
+    (maphash (lambda (id _title)
+               (let ((path (raindrop--build-collection-path id by-id by-parent)))
+                 (when path
+                   (puthash (downcase path) id by-path))))
+             by-id)
     (setq raindrop--collections-by-title by-title
-          raindrop--collections-by-id by-id)))
+          raindrop--collections-by-id by-id
+          raindrop--collections-by-path by-path
+          raindrop--collections-parent by-parent
+          raindrop--collections-all items)))
+
+(defun raindrop--run-collections-callbacks ()
+  "Run all pending collection callbacks and clear the list."
+  (let ((callbacks raindrop--collections-callbacks))
+    (setq raindrop--collections-callbacks nil)
+    (dolist (cb callbacks)
+      (when cb (funcall cb)))))
 
 (defun raindrop--ensure-collections-async (&optional callback)
-  "Ensure collections are loaded, calling CALLBACK when ready."
-  (unless (or raindrop--collections-ready
-              raindrop--collections-loading)
+  "Ensure collections are loaded (root + nested), calling CALLBACK when ready."
+  (cond
+   (raindrop--collections-ready
+    (when callback (funcall callback)))
+   (raindrop--collections-loading
+    (when callback
+      (push callback raindrop--collections-callbacks)))
+   (t
+    (when callback
+      (push callback raindrop--collections-callbacks))
     (setq raindrop--collections-loading t)
-    (when raindrop-debug
-      (raindrop--debug "loading collections…"))
     (raindrop-api-request-async
      "/collections" 'GET nil nil
-     (lambda (res err)
-       (setq raindrop--collections-loading nil)
-       (if err
-           (when raindrop-debug
-             (raindrop--debug "collections load error: %s" err))
-         (let ((items (alist-get 'items res)))
-           (when (vectorp items)
-             (setq items (append items nil)))
-           (raindrop--build-collections-index (or items '()))))
-       (setq raindrop--collections-ready t)
-       (when callback (funcall callback))))))
+     (lambda (root-res root-err)
+       (if root-err
+           (progn
+             (setq raindrop--collections-loading nil
+                   raindrop--collections-ready t)
+             (raindrop--run-collections-callbacks))
+         (let ((root-items (alist-get 'items root-res)))
+           (when (vectorp root-items)
+             (setq root-items (append root-items nil)))
+           (raindrop-api-request-async
+            "/collections/childrens" 'GET nil nil
+            (lambda (child-res child-err)
+              (setq raindrop--collections-loading nil)
+              (let ((child-items (unless child-err
+                                   (let ((items (alist-get 'items child-res)))
+                                     (if (vectorp items) (append items nil) items))))
+                    (all-items (or root-items '())))
+                (when child-items
+                  (setq all-items (append all-items child-items)))
+                (raindrop--build-collections-index all-items))
+              (setq raindrop--collections-ready t)
+              (raindrop--run-collections-callbacks))))))))))
+
+(defun raindrop--ensure-collections-sync ()
+  "Ensure collections are loaded synchronously."
+  (unless raindrop--collections-ready
+    (let* ((root-res (raindrop-api-request "/collections" 'GET nil nil))
+           (root-items (let ((items (alist-get 'items root-res)))
+                         (if (vectorp items) (append items nil) items)))
+           (child-res (condition-case nil
+                          (raindrop-api-request "/collections/childrens" 'GET nil nil)
+                        (error nil)))
+           (child-items (when child-res
+                          (let ((items (alist-get 'items child-res)))
+                            (if (vectorp items) (append items nil) items))))
+           (all-items (append (or root-items '()) (or child-items '()))))
+      (raindrop--build-collections-index all-items)
+      (setq raindrop--collections-ready t))))
 
 (defun raindrop--collection-id-by-title (name)
-  "Get collection ID by title NAME."
-  (when (and name raindrop--collections-by-title)
-    (gethash (downcase name) raindrop--collections-by-title)))
+  "Get collection ID by NAME (title or full path like \"Parent/Child\")."
+  (when name
+    (let* ((lname (downcase name))
+           (by-path (and raindrop--collections-by-path
+                         (gethash lname raindrop--collections-by-path)))
+           (by-title (and raindrop--collections-by-title
+                          (gethash lname raindrop--collections-by-title)))
+           (by-path-suffix
+            (and (not by-path)
+                 (not by-title)
+                 raindrop--collections-by-path
+                 (let ((suffix (concat "/" lname))
+                       found-id)
+                   (maphash (lambda (path id)
+                              (when (and (not found-id)
+                                         (string-suffix-p suffix path))
+                                (setq found-id id)))
+                            raindrop--collections-by-path)
+                   found-id)))
+           (by-substring
+            (and (not by-path)
+                 (not by-title)
+                 (not by-path-suffix)
+                 raindrop--collections-by-path
+                 (let (found-id)
+                   (maphash (lambda (path id)
+                              (when (and (not found-id)
+                                         (string-match-p (regexp-quote lname) path))
+                                (setq found-id id)))
+                            raindrop--collections-by-path)
+                   found-id))))
+      (or by-path by-title by-path-suffix by-substring))))
 
 (defun raindrop--collection-title-by-id (cid)
   "Get collection title by ID CID."
@@ -794,12 +922,33 @@ tags (list of {_id count}), types (list of {_id count})."
     (gethash cid raindrop--collections-by-id))
    (t nil)))
 
+(defun raindrop--collection-path-by-id (cid)
+  "Get full collection path by ID CID (e.g. \"Parent/Child\")."
+  (cond
+   ((null cid) nil)
+   ((eq cid -1) "Unsorted")
+   ((and raindrop--collections-by-id
+         raindrop--collections-parent
+         (gethash cid raindrop--collections-by-id))
+    (raindrop--build-collection-path cid
+                                      raindrop--collections-by-id
+                                      raindrop--collections-parent))
+   (t (raindrop--collection-title-by-id cid))))
+
+(defun raindrop--all-collection-paths ()
+  "Return list of all collection paths for completion."
+  (when raindrop--collections-by-path
+    (let (paths)
+      (maphash (lambda (_key id)
+                 (let ((path (raindrop--collection-path-by-id id)))
+                   (when path (push path paths))))
+               raindrop--collections-by-id)
+      (sort paths #'string<))))
+
 ;;;; High-level search API
 
-(defun raindrop-search-bookmarks (input &optional callback limit page)
-  "Search Raindrop bookmarks with INPUT string.
-If CALLBACK is provided, performs async search, otherwise sync.
-Returns normalized items list (sync) or calls CALLBACK with (items err)."
+(defun raindrop--do-search-bookmarks (input callback limit page)
+  "Internal search implementation after collections are loaded."
   (let* ((parsed (raindrop--parse-search-input input))
          (tags (plist-get parsed :tags))
          (excluded-tags (plist-get parsed :excluded-tags))
@@ -813,10 +962,6 @@ Returns normalized items list (sync) or calls CALLBACK with (items err)."
          (pair (raindrop--build-search-endpoint-and-query coll-id search page limit))
          (endpoint (car pair))
          (query (cdr pair)))
-    (when raindrop-debug
-      (raindrop--debug "search=%S endpoint=%s" (if (string-empty-p search) nil search) endpoint))
-    (raindrop--debug "parsed input - tags=%S excluded-tags=%S folders=%S text=%S" tags excluded-tags folders text)
-    (raindrop--debug "search string=%S endpoint=%s" search endpoint)
     (if callback
         (raindrop-api-request-async
          endpoint 'GET query nil
@@ -835,13 +980,22 @@ Returns normalized items list (sync) or calls CALLBACK with (items err)."
       (let* ((payload (raindrop-api-request endpoint 'GET query nil))
              (items-raw (alist-get 'items payload))
              (items (if (vectorp items-raw) (append items-raw nil) items-raw)))
-        (raindrop--debug "API response - payload keys=%S items count=%S (vectorp=%S)" 
-                         (mapcar #'car payload) (length items) (vectorp items-raw))
-        (raindrop--debug "first raw item=%S" (car items))
-        (let ((normalized (raindrop--normalize-items items)))
-          (raindrop--debug "normalized count=%S first normalized=%S" 
-                           (length normalized) (car normalized))
-          normalized)))))
+        (raindrop--normalize-items items)))))
+
+(defun raindrop-search-bookmarks (input &optional callback limit page)
+  "Search Raindrop bookmarks with INPUT string.
+If CALLBACK is provided, performs async search, otherwise sync.
+Returns normalized items list (sync) or calls CALLBACK with (items err).
+Ensures collections are loaded before searching."
+  (if callback
+      (if raindrop--collections-ready
+          (raindrop--do-search-bookmarks input callback limit page)
+        (raindrop--ensure-collections-async
+         (lambda ()
+           (raindrop--do-search-bookmarks input callback limit page))))
+    (unless raindrop--collections-ready
+      (raindrop--ensure-collections-sync))
+    (raindrop--do-search-bookmarks input callback limit page)))
 
 ;;;; Tags management
 
