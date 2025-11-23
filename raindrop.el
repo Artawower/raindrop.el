@@ -285,7 +285,6 @@ A list is normalized element-wise."
         raindrop--collections-cache)))
 
 (defun raindrop--resolve-collection-id (folder-name)
-  "Resolve FOLDER-NAME (string/symbol) to a collection ID or nil."
   (let* ((name (if (symbolp folder-name) (symbol-name folder-name) folder-name))
          (items (raindrop--collections-list))
          (match (seq-find (lambda (it)
@@ -339,7 +338,7 @@ Return parsed JSON as alist. Signal `user-error` for HTTP or parse errors."
                             (let ((status-code (when response (request-response-status-code response)))
                                   (err-msg (format "%s" error-thrown)))
                               (setq result-error (format "HTTP %s for %s: %s"
-                                                        (or status-code "unknown") endpoint err-msg))))))
+                                                         (or status-code "unknown") endpoint err-msg))))))
     (if result-error
         (user-error "raindrop.el: %s" result-error)
       result-data)))
@@ -408,7 +407,7 @@ Supports '#tag', '#\"spaced tag\"', '-#tag', '-#\"spaced tag\"' for tags."
             (let ((start pos)
                   (end pos))
               (while (and (< end len) 
-                         (not (memq (aref s end) '(?\s ?\t))))
+                          (not (memq (aref s end) '(?\s ?\t))))
                 (setq end (1+ end)))
               (when (> end start)
                 (push (substring s start end) excluded-tags))
@@ -451,7 +450,7 @@ Supports '#tag', '#\"spaced tag\"', '-#tag', '-#\"spaced tag\"' for tags."
               (let ((start pos)
                     (end pos))
                 (while (and (< end len) 
-                           (not (memq (aref s end) '(?\s ?\t))))
+                            (not (memq (aref s end) '(?\s ?\t))))
                   (setq end (1+ end)))
                 (push (substring s start end) texts)
                 (setq pos end)))))
@@ -461,7 +460,7 @@ Supports '#tag', '#\"spaced tag\"', '-#tag', '-#\"spaced tag\"' for tags."
           (let ((start pos)
                 (end pos))
             (while (and (< end len) 
-                       (not (memq (aref s end) '(?\s ?\t))))
+                        (not (memq (aref s end) '(?\s ?\t))))
               (setq end (1+ end)))
             (push (substring s start end) texts)
             (setq pos end))))))
@@ -634,15 +633,15 @@ Returns list of normalized items."
          (limit (or (plist-get plist :limit) raindrop-default-limit))
          (input (string-join 
                  (delq nil
-                   (append 
-                    (when tags 
-                      (list (raindrop--build-tag-search tags match)))
-                    (when excluded-tags
-                      (list (raindrop--build-excluded-tag-search excluded-tags)))
-                    (when folders
-                      (list (string-join (mapcar (lambda (folder) (concat "[" folder "]")) folders) " ")))
-                    (when (and search-text (not (string-empty-p (string-trim search-text))))
-                      (list (string-trim search-text)))))
+                       (append 
+                        (when tags 
+                          (list (raindrop--build-tag-search tags match)))
+                        (when excluded-tags
+                          (list (raindrop--build-excluded-tag-search excluded-tags)))
+                        (when folders
+                          (list (string-join (mapcar (lambda (folder) (concat "[" folder "]")) folders) " ")))
+                        (when (and search-text (not (string-empty-p (string-trim search-text))))
+                          (list (string-trim search-text)))))
                  " ")))
     (when raindrop-debug
       (raindrop--debug "fetch input=%S limit=%S" input limit))
@@ -663,15 +662,15 @@ Returns list of normalized items."
          (limit (or (plist-get plist :limit) raindrop-default-limit))
          (input (string-join 
                  (delq nil
-                   (append 
-                    (when tags 
-                      (list (raindrop--build-tag-search tags match)))
-                    (when excluded-tags
-                      (list (raindrop--build-excluded-tag-search excluded-tags)))
-                    (when folders
-                      (list (string-join (mapcar (lambda (folder) (concat "[" folder "]")) folders) " ")))
-                    (when (and search-text (not (string-empty-p (string-trim search-text))))
-                      (list (string-trim search-text)))))
+                       (append 
+                        (when tags 
+                          (list (raindrop--build-tag-search tags match)))
+                        (when excluded-tags
+                          (list (raindrop--build-excluded-tag-search excluded-tags)))
+                        (when folders
+                          (list (string-join (mapcar (lambda (folder) (concat "[" folder "]")) folders) " ")))
+                        (when (and search-text (not (string-empty-p (string-trim search-text))))
+                          (list (string-trim search-text)))))
                  " ")))
     (when raindrop-debug
       (raindrop--debug "fetch-async input=%S limit=%S" input limit))
@@ -816,8 +815,8 @@ Returns normalized items list (sync) or calls CALLBACK with (items err)."
          (query (cdr pair)))
     (when raindrop-debug
       (raindrop--debug "search=%S endpoint=%s" (if (string-empty-p search) nil search) endpoint))
-  (raindrop--debug "parsed input - tags=%S excluded-tags=%S folders=%S text=%S" tags excluded-tags folders text)
-  (raindrop--debug "search string=%S endpoint=%s" search endpoint)
+    (raindrop--debug "parsed input - tags=%S excluded-tags=%S folders=%S text=%S" tags excluded-tags folders text)
+    (raindrop--debug "search string=%S endpoint=%s" search endpoint)
     (if callback
         (raindrop-api-request-async
          endpoint 'GET query nil
@@ -837,11 +836,11 @@ Returns normalized items list (sync) or calls CALLBACK with (items err)."
              (items-raw (alist-get 'items payload))
              (items (if (vectorp items-raw) (append items-raw nil) items-raw)))
         (raindrop--debug "API response - payload keys=%S items count=%S (vectorp=%S)" 
-                 (mapcar #'car payload) (length items) (vectorp items-raw))
+                         (mapcar #'car payload) (length items) (vectorp items-raw))
         (raindrop--debug "first raw item=%S" (car items))
         (let ((normalized (raindrop--normalize-items items)))
           (raindrop--debug "normalized count=%S first normalized=%S" 
-                   (length normalized) (car normalized))
+                           (length normalized) (car normalized))
           normalized)))))
 
 ;;;; Tags management
@@ -936,10 +935,10 @@ Returns list of tags or calls CALLBACK with (tags err)."
   (interactive)
   (let* ((tags (raindrop-load-tags))
          (tag-names (mapcar (lambda (tag) 
-                             (or (alist-get '_id tag)
-                                 (alist-get 'name tag)
-                                 (format "%s" tag)))
-                           tags))
+                              (or (alist-get '_id tag)
+                                  (alist-get 'name tag)
+                                  (format "%s" tag)))
+                            tags))
          (tags-string (string-join tag-names ", ")))
     (if tag-names
         (progn
