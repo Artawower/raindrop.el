@@ -481,6 +481,7 @@ Returns the level that group headings should use."
 
 ;; dynamic block
 
+;;;###autoload
 (defun org-dblock-write:raindrop (params)
   "Writer for the \"raindrop\" dynamic block using PARAMS.
 Supported formats:
